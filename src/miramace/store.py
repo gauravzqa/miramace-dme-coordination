@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import uuid
 from datetime import UTC, datetime
@@ -84,7 +85,10 @@ class Store:
         self._db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         self._db.row_factory = sqlite3.Row
         if self.path != ":memory:":
-            self._db.execute("PRAGMA journal_mode=WAL")
+            # Single-process tool: classic rollback journal works on every filesystem (WAL fails on
+            # some shared/network mounts with "disk I/O error"). Opt in with MIRA_SQLITE_WAL=1.
+            if os.getenv("MIRA_SQLITE_WAL") == "1":
+                self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA foreign_keys=ON")
         self._db.executescript(SCHEMA)
         self._states: dict[str, CaseState] = {}
