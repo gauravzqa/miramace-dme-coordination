@@ -38,7 +38,8 @@ Report her intents (empty list if none):
 (`note`: distress | clinical | confusion | human)
 - delivery_confirmed: she confirms the wheelchair arrived and works
 If she is worried, scared, hurt, or asks for a person, ALWAYS include needs_human (or cost_concern for cost) \
-and tell her a nurse will contact her.
+and tell her a nurse will contact her. If she mentions a fall, injury, pain, chest pain, trouble breathing, \
+bleeding or fainting, also tell her to call 911 now if it is an emergency or she can't stand or bear weight.
 
 {snapshot}"""
 
@@ -65,6 +66,12 @@ _DISTRESS_RE = re.compile(
     r"chest|bleeding|bleed|blood|emergency|911|ambulance|unconscious|passed out|pass out|fainted|faint|"
     r"can'?t breathe|cannot breathe|can not breathe|short of breath|trouble breathing|hard to breathe|"
     r"confused|confusing|stroke|help me)\b",
+    re.IGNORECASE,
+)
+URGENT_SENTENCE = "If this is an emergency, or you can't stand or put weight on it, please call 911 now."
+_URGENT_RE = re.compile(
+    r"\b(fell|fallen|fall|injur\w*|hurt\w*|pain\w*|chest|can'?t breathe|cannot breathe|short of breath|"
+    r"bleed\w*|faint\w*|passed out|unconscious|dizzy|emergency|911)\b",
     re.IGNORECASE,
 )
 _HUMAN_RE = re.compile(
@@ -174,6 +181,11 @@ class LLMCompanion:
             flags.append("safety_net_needs_human")
         if any(i.kind in ("needs_human", "cost_concern") for i in intents) and "nurse" not in reply.lower():
             reply = f"{reply} {HANDOFF_SENTENCE}"
+        # Possible injury / acute symptom: always give the emergency instruction (code-enforced, not left to
+        # the model). Live run: "I fell ... my hip really hurts" only got "a nurse will contact you".
+        if _URGENT_RE.search(text) and "911" not in reply:
+            reply = f"{reply} {URGENT_SENTENCE}"
+            flags.append("urgent_advice")
 
         ok = not grounding_check(reply, snapshot, self.profile)
         return CompanionReply(reply=reply, intents=intents, grounding_ok=ok, flags=flags)

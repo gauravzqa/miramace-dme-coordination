@@ -403,3 +403,20 @@ def test_f2_grounding_amounts_iso_dates_durations_and_domain_words():
     assert grounding_check("We'll know in three weeks.", snap)
     assert not grounding_check("Your Care Advocate is checking the K0001 order under Part B.", snap)
     assert not grounding_check("You pay 20% for up to 13 months after the $283 deductible.", snap)
+
+
+async def test_live_regression_fall_gets_emergency_instruction():
+    """Live run: 'I fell ... my hip really hurts' got only 'a nurse will contact you'. Must add 911 advice."""
+    from miramace.companion.agent import LLMCompanion, URGENT_SENTENCE
+    from miramace.agents.schemas import CompanionOut, IntentLLM
+    from miramace.llm.port import ScriptedLLM
+
+    out = CompanionOut(reply="I'm sorry you're hurt. A nurse will contact you about this.",
+                       intents=[IntentLLM(kind="needs_human", address=None, preferred_time=None, note="distress")])
+    llm = ScriptedLLM({("companion", "*"): out})
+    comp = LLMCompanion(llm, conversation_id="c1")
+    snap = build_snapshot(base_state(), SIM_START)
+    rep = await comp.respond(snap, [], "I fell in the kitchen this morning and my hip really hurts.")
+    assert URGENT_SENTENCE in rep.reply and any(i.kind == "needs_human" for i in rep.intents)
+    rep2 = await comp.respond(snap, [], "Where is my wheelchair?")
+    assert "911" not in rep2.reply
