@@ -14,7 +14,7 @@ Writeup: [`docs/WRITEUP.md`](docs/WRITEUP.md) · Live-defense run sheet: [`docs/
 uv sync                               # Python 3.12
 uv run mira run-all --llm fake        # all 7 scenarios + metrics, ~seconds, no network
 uv run mira run happy_path            # stream one case's timeline on the virtual clock
-uv run pytest -q                      # 320 passed, 1 skipped
+uv run pytest -q                      # 356 passed, 1 skipped
 ```
 
 `--llm fake` swaps every LLM for a deterministic fake behind the same ports (fact-sheet personas, rule-based caller, keyword companion). The core, rules, guards and checks are the same code in both modes.
@@ -95,13 +95,13 @@ Schema and fact-sheet slots: [`scenarios/README.md`](scenarios/README.md).
 |---|---|---|---|
 | happy_path | DONE | 4.0 | 8 |
 | supplier_disqualified | DONE | 4.0 | 10 |
-| ghost_failover | DONE | 4.0 | 23 |
-| lcd_missing_addendum | DONE | 8.0 | 10 |
-| pcp_never_got_it | DONE | 15.0 | 13 |
-| cost_concern | BLOCKED_ON_HUMAN | 2.0 | 4 |
+| ghost_failover | DONE | 4.0 | 12 |
+| lcd_missing_addendum | DONE | 8.0 | 11 |
+| pcp_never_got_it | DONE | 10.0 | 12 |
+| cost_concern | BLOCKED_ON_HUMAN | 3.2 | 7 |
 | code_drift_k0003 | BLOCKED_ON_HUMAN | 3.0 | 5 |
 
-7/7 expectations pass · 5 autonomous closes · **false closes 0** · escalation precision 1.00 / recall 1.00 · invariant violations 0 · PHI before qualification 0 · `pytest`: 320 passed, 1 skipped (the skip needs the voice extra).
+7/7 expectations pass · 5 autonomous closes · **false closes 0** · escalation precision 1.00 / recall 1.00 · invariant violations 0 · PHI before qualification 0 · `pytest`: 356 passed, 1 skipped (the skip needs the voice extra).
 
 These numbers are from fake mode: they prove the orchestration, rules and guards. Extraction accuracy, companion tone and per-case cost need the live runs (see the writeup's "What's next").
 

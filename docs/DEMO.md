@@ -39,14 +39,14 @@ Optional: `uv run mira transcript <tr_id> --case <case_id>` (ids from `mira tran
 ```bash
 uv run mira run ghost_failover
 ```
-Point at Thursday: `SUPPLIER_NO_ANSWER` ×2 → `SUPPLIER_RELEASED` (RULE: "no answer to 2 re-verification calls") → `ORDER_REDIRECT` Lakeshore → Lincoln Park → `SUPPLIER_COMMITTED` Lincoln → `ORDER_SENT` → delivered Fri. Same 4.0 days as the happy path; no human. The burst of no-answers after it is the system looking for a *new* backup (23 calls total).
+Point at Thursday: `SUPPLIER_NO_ANSWER` ×2 → `SUPPLIER_RELEASED` (RULE: "no answer to 2 order-receipt checks") → `ORDER_REDIRECT` Lakeshore → Lincoln Park → `SUPPLIER_COMMITTED` Lincoln → `ORDER_SENT` → delivered Fri. Same 4.0 days as the happy path; no human. 12 calls total; backup hunting stops once a usable supplier and a validated order exist.
 
 ## 14–17 · pcp_never_got_it
 
 ```bash
 uv run mira run pcp_never_got_it
 ```
-Point at `ORDER_REQUEST_VERIFIED` "PCP says request NOT received -> resend" then `ORDER_REQUESTED … :v2`. **Verify first, then resend** under a new idempotency key — never a blind duplicate. Honest note: 15 sim days, because the first follow-up waits 24 business hours after the missed Thursday promise. That grace period is a policy knob; an advocate would likely call Friday morning.
+Point at `ORDER_REQUEST_VERIFIED` "PCP says request NOT received -> resend" then `ORDER_REQUESTED … :v2`. **Verify first, then resend** under a new idempotency key — never a blind duplicate. 10 sim days: the first follow-up runs Friday 09:00, the morning after the missed Thursday promise (follow-ups at 8/16/24 business hours; a policy knob). Next step: a receipt check the morning after the request would cut this further.
 
 ## 17–22 · cost_concern → resolve → DONE
 
@@ -55,7 +55,7 @@ uv run mira run cost_concern                    # ends BLOCKED_ON_HUMAN
 uv run mira escalations <case_id> --open
 uv run mira resolve <case_id> esc-cost_concern-1 nurse_resolved_accepted --note "Explained 20% share"
 ```
-Point at: `CONCERN_RAISED` with her exact words; the escalation is **PATIENT lane**, with typed options and a suggested one; the order track kept moving (visit note arrived Wed while blocked). After resolve: `HUMAN_RESOLVED` → delivered → `CASE_DONE`. The resolve summary prints `expectation FAIL` because the scenario's expectation is the pre-resolve state; ignore it and say so.
+Point at: `CONCERN_RAISED` with her exact words; the escalation is **PATIENT lane**, with typed options and a suggested one; the order track kept moving (visit note arrived Wed while blocked). After resolve: `HUMAN_RESOLVED` → delivered → `CASE_DONE`. The resolve summary shows "resumed after human resolution → DONE".
 
 ## 22–26 · Companion chat
 
@@ -107,4 +107,4 @@ uv run mira run-all --llm fake
 | LiveKit / audio | `uv run mira call pcp --text --llm live`, or `--llm fake` if the LLM is also down |
 | `chat --llm live` slow | `mira chat <case_id>` (fake keyword companion); safety net + grounding still demonstrable |
 | Terminal too narrow | `export COLUMNS=160`, rerun |
-| Anything else | `uv run pytest -q` (320 passed, 1 skipped) and walk the timeline of a stored case with `mira timeline <case_id>` |
+| Anything else | `uv run pytest -q` (356 passed, 1 skipped) and walk the timeline of a stored case with `mira timeline <case_id>` |
