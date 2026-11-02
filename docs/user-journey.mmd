@@ -1,0 +1,54 @@
+sequenceDiagram
+  autonumber
+  participant E as Eleanor
+  participant C as Companion (LLM)
+  participant K as Core (code)
+  participant V as Voice callers (LLM)
+  participant P as PCP front desk
+  participant SU as Suppliers (12)
+  participant N as Nurse advocate
+
+  Note over K: T+0 intake complete, verbal order in chart
+  K->>C: Start: introduce, collect address, home, consent
+  C->>E: "I'll handle your wheelchair, a nurse is always there"
+  E-->>C: Address, home layout, caregiver, consent
+  C->>K: intents: confirm_address, give_consent
+  par Order track (critical path)
+    K->>V: Task: request visit note + SWO from PCP
+    V->>P: Verify office, request note + send SWO draft
+    P-->>V: "Maria will send by Thursday"
+    V-->>K: Facts + quotes, ledger: Maria, due Thu
+  and Supplier track
+    K->>V: Task: screen suppliers near her ZIP (no PHI)
+    V->>SU: New pts? K0001? Deliver? Assignment?
+    SU-->>V: Answers
+    V-->>K: Facts + quotes, rules commit ONE supplier
+  end
+  K->>C: Notify: cost (from snapshot)
+  C->>E: $283 deductible, then 20%/mo rental, then hers
+  alt Eleanor: "I can't afford that"
+    C->>K: intent: cost_concern
+    K->>N: Patient-lane escalation + context
+    N->>E: Warm handoff call
+  else accepts
+    E-->>C: OK
+    C->>K: intent: cost_accepted
+  end
+  E->>C: 9pm "Where's my wheelchair?"
+  C-->>E: Answer from snapshot: "Order due from Dr. Chen Thu"
+  P->>SU: Signed SWO + notes to committed supplier
+  K->>V: Task: confirm order receipt + reverify stock
+  V->>SU: "Did you receive Eleanor's order (ref R-1)?"
+  SU-->>V: Received
+  alt supplier silent past due
+    K->>V: Follow up, then fail over to backup
+    K->>V: ORDER_REDIRECT via PCP
+  end
+  K->>K: Rules: K0001 + assignment + docs + cost accepted
+  K->>C: Notify: propose delivery window
+  C->>E: "Monday 10-12 OK?"
+  E-->>C: Yes
+  SU->>E: Delivers chair (proof of delivery)
+  C->>E: "Is it working? Fits your doorways?"
+  E-->>C: Yes
+  C->>K: intent: delivery_confirmed, case DONE

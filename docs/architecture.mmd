@@ -1,0 +1,63 @@
+flowchart TB
+  EL(["Eleanor"])
+
+  subgraph PF["Patient-facing (AI)"]
+    direction TB
+    CO["Companion agent (LLM)<br/>warm, remembers her, voice/text"]
+    GC["Grounding check (code)<br/>dates / $ / names in snapshot?"]
+    PP[("Patient profile<br/>best times, caregiver, needs")]
+    NP["Notify policy (code)<br/>WHEN to tell her"]
+    CO <--> GC
+    PP --> CO
+    NP --> CO
+  end
+
+  subgraph CORE["Deterministic core (code) - owns the case"]
+    direction TB
+    API["Intent API<br/>confirm_address, consent, ask_status,<br/>cost_concern, reschedule, needs_human"]
+    OR["Orchestrator: event -> state -> next action<br/>triggers: timers | call results | patient msgs"]
+    TR["Who holds the ball: state, owner, due<br/>Patient | Order (critical) | Supplier | Assignment | Delivery"]
+    RU["Rules engine<br/>K0001, LCD criteria, assignment"]
+    LE[("Commitment ledger<br/>overdue = silence")]
+    EV[("Event log<br/>source of truth")]
+    SN[("Case snapshot<br/>read-only view")]
+    API --> OR --> TR
+    RU --> OR
+    LE --> OR
+    OR --> EV --> SN
+  end
+
+  subgraph OUT["Outbound task agents (AI)"]
+    direction TB
+    VC["Voice callers (LLM)<br/>one task, then exit"]
+    CP["PCP front desk / suppliers<br/>(mocked personas)"]
+    EX["Extractor (LLM)<br/>facts + evidence quotes"]
+    VC <--> CP
+    CP -- transcript --> EX
+  end
+
+  HU["Nurse advocate<br/>escalations + warm handoff"]
+
+  EL <--> CO
+  CO -- "typed intents" --> API
+  SN -. "facts only from here" .-> CO
+  OR -- "state change" --> NP
+  OR -- "task" --> VC
+  EX -- "checked facts" --> OR
+  OR <-- "typed Q / HUMAN_RESOLVED" --> HU
+  HU -. "warm handoff" .-> EL
+
+  classDef llm fill:#b2f2bb,stroke:#22c55e,color:#1e1e1e;
+  classDef code fill:#d0bfff,stroke:#8b5cf6,color:#1e1e1e;
+  classDef store fill:#c3fae8,stroke:#06b6d4,color:#1e1e1e;
+  classDef mock fill:#ffd8a8,stroke:#f59e0b,color:#1e1e1e;
+  classDef human fill:#ffc9c9,stroke:#ef4444,color:#1e1e1e;
+  classDef contract fill:#fff3bf,stroke:#f59e0b,color:#1e1e1e;
+  classDef patient fill:#a5d8ff,stroke:#4a9eed,color:#1e1e1e;
+  class CO,VC,EX llm;
+  class GC,NP,OR,TR,RU code;
+  class PP,LE,EV,SN store;
+  class CP mock;
+  class HU human;
+  class API contract;
+  class EL patient;
