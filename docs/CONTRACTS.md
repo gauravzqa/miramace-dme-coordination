@@ -6,7 +6,7 @@ Changing anything here requires orchestrator sign-off.
 | Module | Key exports |
 |---|---|
 | `models.py` | `CHICAGO`, `PCP_PARTY_ID="pcp"`, `TARGET_HCPCS`, `idem_key()`, `slugify()`; enums `Owner Track CaseStatus PatientStatus OrderStatus SupplierTrackStatus AssignmentStatus DeliveryStatus SupplierStatus LCDCriterion CommitmentStatus EscalationLane EscalationStatus EscalationTrigger TaskKind TaskStatus InboundDocKind`; Literals `IntentKind NotifyPurpose CallOutcome CallTransport LCDResult PersonaBehaviour`; `LCD_CRITERION_BY_LLM_ID`; models `TrackState Address PatientProfile PatientPHI Patient PCP Supplier SupplierFacts SupplierRecord SWO LCDChecklist VisitNote InboundDoc Commitment EscalationOption Escalation TaskSpec Task SlotSpec CallTask Utterance Claim LLMCall CallResult Intent SnapshotItem CostInfo Snapshot ComposeRequest CompanionReply PatientReply Fact PersonaSim PersonaSpec CaseState`; `eleanor() dr_chen() load_suppliers()` |
-| `events.py` | `EventType` (55 types), one payload model per type, `PAYLOADS`, `Source`, `SourceKind`, `Event` (+`.parsed()`), `make_event()`, `PlannerDecision` |
+| `events.py` | `EventType` (51 types), one payload model per type, `PAYLOADS`, `Source`, `SourceKind`, `Event` (+`.parsed()`), `make_event()`, `PlannerDecision` |
 | `ports.py` | `LLMPort CallerPort DocReaderPort CompanionPort PatientChannel InboundPort Brain` (runtime_checkable Protocols), `TranscriptView`, `CallPhase`, `Ports` dataclass |
 | `clock.py` | `SIM_START`, `VirtualClock(now, advance_to, advance)`, `ClockError`, `is_business`, `next_business_time`, `add_business_hours`, `next_patient_time`, `is_patient_time` |
 | `agents/schemas.py` | `CallerTurn PersonaTurn ClaimLLM Extraction CriterionResult LCDCheck IntentLLM CompanionOut`, `LLM_SCHEMAS` |
