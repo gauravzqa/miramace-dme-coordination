@@ -1,0 +1,198 @@
+# ghost_failover: Lakeshore qualifies and commits, then goes silent once the order is faxed; lease released, order redirected to backup Lincoln Park.
+# Generated layout; edit freely (schema: scenarios/README.md).
+name: ghost_failover
+description: Lakeshore qualifies and commits, then goes silent once the order is faxed; lease released, order redirected to
+  backup Lincoln Park.
+patient:
+  address: 2150 N Lincoln Park W, Chicago, IL 60614
+  best_hours:
+  - 9
+  - 20
+  caregiver_name: Ana
+patient_script:
+  welcome_intake:
+  - kind: confirm_address
+    address: 2150 N Lincoln Park W, Chicago, IL 60614
+  - kind: give_consent
+  cost_disclosure:
+  - kind: cost_accepted
+  delivery_slot:
+  - kind: confirm_delivery_slot
+  delivered_checkin:
+  - kind: delivery_confirmed
+personas:
+  pcp:
+    role: pcp
+    org_name: Sunrise Family Medicine
+    answerer_name: Maria
+    behaviour: helpful
+    facts:
+    - id: pcp_recv
+      slot: request_received
+      value: 'yes'
+      text: Yes, we have your request for Eleanor's wheelchair.
+      reveal_when: asked whether the order request was received
+    - id: pcp_status
+      slot: order_status
+      value: pending signature
+      text: It's waiting on Dr. Chen's signature.
+      reveal_when: asked about the status of the order
+    - id: pcp_signer
+      slot: signer_available
+      value: 'yes'
+      text: Dr. Chen is in clinic all week, so she can sign it.
+      reveal_when: asked whether the doctor is available to sign
+    - id: pcp_action
+      slot: promised_action
+      value: fax visit note and signed order
+      text: We'll fax the visit note and the signed order.
+      reveal_when: asked what the office will send
+    - id: pcp_by
+      slot: promised_by
+      value: Thursday
+      text: By Thursday.
+      reveal_when: asked when it will be sent
+    - id: pcp_owner
+      slot: named_owner
+      value: Maria
+      text: I'm handling it myself, this is Maria.
+      reveal_when: asked who is handling it
+    - id: pcp_fax
+      slot: fax_number
+      value: 312-555-0199
+      text: Our fax is 312-555-0199.
+      reveal_when: asked for the fax number
+    sim:
+      note_delay_bh: 16
+      signed_delay_bh: 24
+      fax_delay_bh: 4
+      visit_note_text: 'Sunrise Family Medicine - Office visit 10/30/2026. Patient: Eleanor Martinez, 72. Seen by Dr. Sarah
+        Chen. Assessment: progressive bilateral knee osteoarthritis with deconditioning. Her mobility limitation prevents
+        her from getting to the bathroom and kitchen safely and in a reasonable time. She has tried a cane and a front-wheeled
+        walker; a walker is insufficient because of shoulder pain and two near-falls. Her apartment has 34-inch doorways,
+        a level entry and hard floors; the home accommodates a manual wheelchair. A manual wheelchair will significantly improve
+        her ability to toilet, dress and prepare meals, and she will use it daily at home. She is able to self-propel with
+        her upper body, and her daughter Ana is available and willing to push when needed. Plan: K0001 standard manual wheelchair,
+        rental. Order to follow.'
+      note_claims:
+      - field: MRADL_LIMITATION
+        status: stated
+        value: 'true'
+        evidence_quote: Her mobility limitation prevents her from getting to the bathroom and kitchen safely and in a reasonable
+          time.
+      - field: CANE_WALKER_INSUFFICIENT
+        status: stated
+        value: 'true'
+        evidence_quote: She has tried a cane and a front-wheeled walker; a walker is insufficient because of shoulder pain
+          and two near-falls.
+      - field: HOME_ACCOMMODATES
+        status: stated
+        value: 'true'
+        evidence_quote: Her apartment has 34-inch doorways, a level entry and hard floors; the home accommodates a manual
+          wheelchair.
+      - field: WILL_USE_IMPROVES
+        status: stated
+        value: 'true'
+        evidence_quote: A manual wheelchair will significantly improve her ability to toilet, dress and prepare meals, and
+          she will use it daily at home.
+      - field: SELF_PROPEL_OR_CAREGIVER
+        status: stated
+        value: 'true'
+        evidence_quote: She is able to self-propel with her upper body, and her daughter Ana is available and willing to push
+          when needed.
+      swo_signed:
+        beneficiary_name: Eleanor Martinez
+        mbi: 1EG4-TE5-MK72
+        order_date: '2026-11-03'
+        item_description: Standard manual wheelchair
+        hcpcs: K0001
+        quantity: 1
+        practitioner_name: Dr. Sarah Chen
+        practitioner_npi: '1234567893'
+        signed: true
+        signature_date: '2026-11-03'
+        accessories: []
+  lakeshore-home-medical-equipment:
+    role: supplier
+    org_name: Lakeshore Home Medical Equipment
+    answerer_name: Tom
+    behaviour: helpful
+    facts:
+    - id: lakeshore_taking_new_medicare
+      slot: taking_new_medicare
+      value: 'yes'
+      text: Yes, we're taking new Medicare Part B patients.
+      reveal_when: asked whether they take new Medicare Part B patients
+    - id: lakeshore_k0001_in_stock
+      slot: k0001_in_stock
+      value: 'yes'
+      text: Yes, we have standard K0001 chairs in stock.
+      reveal_when: asked whether a K0001 standard manual wheelchair is in stock
+    - id: lakeshore_delivers_to_zip
+      slot: delivers_to_zip
+      value: 'yes'
+      text: Yes, we deliver to 60614.
+      reveal_when: asked whether they deliver to the patient's ZIP code
+    - id: lakeshore_accepts_assignment_all_months
+      slot: accepts_assignment_all_months
+      value: 'yes'
+      text: Yes, we accept assignment for every rental month.
+      reveal_when: asked whether they accept Medicare assignment for every rental month
+    - id: lakeshore_days
+      slot: earliest_delivery_days
+      value: '2'
+      text: We could deliver in 2 business days.
+      reveal_when: asked how soon they could deliver
+    - id: lakeshore_contact
+      slot: contact_name
+      value: Tom
+      text: This is Tom in intake.
+      reveal_when: asked who they are speaking with
+    sim:
+      ghost_after: order_sent
+  lincoln-park-dme-services:
+    role: supplier
+    org_name: Lincoln Park DME Services
+    answerer_name: Priya
+    behaviour: helpful
+    facts:
+    - id: lincoln_taking_new_medicare
+      slot: taking_new_medicare
+      value: 'yes'
+      text: Yes, we're taking new Medicare Part B patients.
+      reveal_when: asked whether they take new Medicare Part B patients
+    - id: lincoln_k0001_in_stock
+      slot: k0001_in_stock
+      value: 'yes'
+      text: Yes, we have standard K0001 chairs in stock.
+      reveal_when: asked whether a K0001 standard manual wheelchair is in stock
+    - id: lincoln_delivers_to_zip
+      slot: delivers_to_zip
+      value: 'yes'
+      text: Yes, we deliver to 60614.
+      reveal_when: asked whether they deliver to the patient's ZIP code
+    - id: lincoln_accepts_assignment_all_months
+      slot: accepts_assignment_all_months
+      value: 'yes'
+      text: Yes, we accept assignment for every rental month.
+      reveal_when: asked whether they accept Medicare assignment for every rental month
+    - id: lincoln_days
+      slot: earliest_delivery_days
+      value: '3'
+      text: We could deliver in 3 business days.
+      reveal_when: asked how soon they could deliver
+    - id: lincoln_contact
+      slot: contact_name
+      value: Priya
+      text: This is Priya in intake.
+      reveal_when: asked who they are speaking with
+    sim:
+      ghost_after: never
+ground_truth:
+  claim_would_pass: true
+  lcd_supported: true
+  hcpcs: K0001
+expect:
+  final: DONE
+  escalations: []
+  max_sim_days: 21

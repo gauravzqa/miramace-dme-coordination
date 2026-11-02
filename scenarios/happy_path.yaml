@@ -1,0 +1,263 @@
+# happy_path: the reference run — every party cooperates; expect DONE with 0 escalations.
+# Schema: scenarios/README.md
+name: happy_path
+description: 'Everything goes right: Maria faxes a complete note and signed K0001 order, Lakeshore qualifies, commits, receives
+  the order and delivers; Eleanor accepts each step.'
+patient:
+  address: 2150 N Lincoln Park W, Chicago, IL 60614
+  best_hours:
+  - 9
+  - 20
+  caregiver_name: Ana
+patient_script:
+  welcome_intake:
+  - kind: confirm_address
+    address: 2150 N Lincoln Park W, Chicago, IL 60614
+  - kind: give_consent
+  cost_disclosure:
+  - kind: cost_accepted
+  delivery_slot:
+  - kind: confirm_delivery_slot
+  delivered_checkin:
+  - kind: delivery_confirmed
+personas:
+  pcp:
+    role: pcp
+    org_name: Sunrise Family Medicine
+    answerer_name: Maria
+    behaviour: helpful
+    facts:
+    - id: pcp_recv
+      slot: request_received
+      value: 'yes'
+      text: Yes, we have your request for Eleanor's wheelchair.
+      reveal_when: asked whether the order request was received
+    - id: pcp_status
+      slot: order_status
+      value: pending signature
+      text: It's waiting on Dr. Chen's signature.
+      reveal_when: asked about the status of the order
+    - id: pcp_signer
+      slot: signer_available
+      value: 'yes'
+      text: Dr. Chen is in clinic all week, so she can sign it.
+      reveal_when: asked whether the doctor is available to sign
+    - id: pcp_action
+      slot: promised_action
+      value: fax visit note and signed order
+      text: We'll fax the visit note and the signed order.
+      reveal_when: asked what the office will send
+    - id: pcp_by
+      slot: promised_by
+      value: Thursday
+      text: By Thursday.
+      reveal_when: asked when it will be sent
+    - id: pcp_owner
+      slot: named_owner
+      value: Maria
+      text: I'm handling it myself, this is Maria.
+      reveal_when: asked who is handling it
+    - id: pcp_fax
+      slot: fax_number
+      value: 312-555-0199
+      text: Our fax is 312-555-0199.
+      reveal_when: asked for the fax number
+    - id: pcp_send_order
+      slot: will_fax_order
+      value: 'yes'
+      text: Sure, we'll fax the signed order and visit note over to them today.
+      reveal_when: asked to fax the order to the supplier
+    - id: pcp_addendum
+      slot: will_send_addendum
+      value: 'yes'
+      text: Yes, Dr. Chen can add an addendum and we'll fax it.
+      reveal_when: asked for an addendum
+    - id: pcp_correction
+      slot: will_send_correction
+      value: 'yes'
+      text: Yes, we'll fax a corrected signed order.
+      reveal_when: asked for a corrected order
+    sim:
+      note_delay_bh: 16
+      signed_delay_bh: 24
+      fax_delay_bh: 4
+      visit_note_text: 'Sunrise Family Medicine - Office visit 10/30/2026. Patient: Eleanor Martinez, 72. Seen by Dr. Sarah
+        Chen. Assessment: progressive bilateral knee osteoarthritis with deconditioning. Her mobility limitation prevents
+        her from getting to the bathroom and kitchen safely and in a reasonable time. She has tried a cane and a front-wheeled
+        walker; a walker is insufficient because of shoulder pain and two near-falls. Her apartment has 34-inch doorways,
+        a level entry and hard floors; the home accommodates a manual wheelchair. A manual wheelchair will significantly improve
+        her ability to toilet, dress and prepare meals, and she will use it daily at home. She is able to self-propel with
+        her upper body, and her daughter Ana is available and willing to push when needed. Plan: K0001 standard manual wheelchair,
+        rental. Order to follow.'
+      note_claims:
+      - field: MRADL_LIMITATION
+        status: stated
+        value: 'true'
+        evidence_quote: Her mobility limitation prevents her from getting to the bathroom and kitchen safely and in a reasonable
+          time.
+      - field: CANE_WALKER_INSUFFICIENT
+        status: stated
+        value: 'true'
+        evidence_quote: She has tried a cane and a front-wheeled walker; a walker is insufficient because of shoulder pain
+          and two near-falls.
+      - field: HOME_ACCOMMODATES
+        status: stated
+        value: 'true'
+        evidence_quote: Her apartment has 34-inch doorways, a level entry and hard floors; the home accommodates a manual
+          wheelchair.
+      - field: WILL_USE_IMPROVES
+        status: stated
+        value: 'true'
+        evidence_quote: A manual wheelchair will significantly improve her ability to toilet, dress and prepare meals, and
+          she will use it daily at home.
+      - field: SELF_PROPEL_OR_CAREGIVER
+        status: stated
+        value: 'true'
+        evidence_quote: She is able to self-propel with her upper body, and her daughter Ana is available and willing to push
+          when needed.
+      swo_signed:
+        beneficiary_name: Eleanor Martinez
+        mbi: 1EG4-TE5-MK72
+        order_date: '2026-11-03'
+        item_description: Standard manual wheelchair
+        hcpcs: K0001
+        quantity: 1
+        practitioner_name: Dr. Sarah Chen
+        practitioner_npi: '1234567893'
+        signed: true
+        signature_date: '2026-11-03'
+        accessories: []
+  lakeshore-home-medical-equipment:
+    role: supplier
+    org_name: Lakeshore Home Medical Equipment
+    answerer_name: Tom
+    behaviour: helpful
+    facts:
+    - id: lakeshore_taking_new_medicare
+      slot: taking_new_medicare
+      value: 'yes'
+      text: Yes, we're taking new Medicare Part B patients.
+      reveal_when: asked whether they take new Medicare Part B patients
+    - id: lakeshore_k0001_in_stock
+      slot: k0001_in_stock
+      value: 'yes'
+      text: Yes, we have standard K0001 chairs in stock.
+      reveal_when: asked whether a K0001 standard manual wheelchair is in stock
+    - id: lakeshore_delivers_to_zip
+      slot: delivers_to_zip
+      value: 'yes'
+      text: Yes, we deliver to 60614.
+      reveal_when: asked whether they deliver to the patient's ZIP code
+    - id: lakeshore_accepts_assignment_all_months
+      slot: accepts_assignment_all_months
+      value: 'yes'
+      text: Yes, we accept assignment for every rental month.
+      reveal_when: asked whether they accept Medicare assignment for every rental month
+    - id: lakeshore_days
+      slot: earliest_delivery_days
+      value: '2'
+      text: We could deliver in 2 business days.
+      reveal_when: asked how soon they could deliver
+    - id: lakeshore_contact
+      slot: contact_name
+      value: Tom
+      text: This is Tom in intake.
+      reveal_when: asked who they are speaking with
+    - id: lakeshore_reserve
+      slot: reserve_unit
+      value: 'yes'
+      text: Yes, we'll hold a K0001 chair for her.
+      reveal_when: asked to hold a unit
+    - id: lakeshore_ref
+      slot: reference_number
+      value: LHM-4471
+      text: Your reference number is LHM-4471.
+      reveal_when: asked for a reference number
+    - id: lakeshore_order_received
+      slot: order_received
+      value: 'yes'
+      text: Yes, we have the signed order from Dr. Chen's office.
+      reveal_when: asked whether the order arrived
+    - id: lakeshore_slot
+      slot: delivery_slot
+      value: tomorrow at 10 AM
+      text: We can bring it out tomorrow at 10 AM.
+      reveal_when: asked when they can deliver
+    - id: lakeshore_delivered
+      slot: delivered
+      value: 'yes'
+      text: Yes, our driver delivered it and she signed for it.
+      reveal_when: asked whether it was delivered
+    sim:
+      ghost_after: never
+  lincoln-park-dme-services:
+    role: supplier
+    org_name: Lincoln Park DME Services
+    answerer_name: Priya
+    behaviour: helpful
+    facts:
+    - id: lincoln_taking_new_medicare
+      slot: taking_new_medicare
+      value: 'yes'
+      text: Yes, we're taking new Medicare Part B patients.
+      reveal_when: asked whether they take new Medicare Part B patients
+    - id: lincoln_k0001_in_stock
+      slot: k0001_in_stock
+      value: 'yes'
+      text: Yes, we have standard K0001 chairs in stock.
+      reveal_when: asked whether a K0001 standard manual wheelchair is in stock
+    - id: lincoln_delivers_to_zip
+      slot: delivers_to_zip
+      value: 'yes'
+      text: Yes, we deliver to 60614.
+      reveal_when: asked whether they deliver to the patient's ZIP code
+    - id: lincoln_accepts_assignment_all_months
+      slot: accepts_assignment_all_months
+      value: 'yes'
+      text: Yes, we accept assignment for every rental month.
+      reveal_when: asked whether they accept Medicare assignment for every rental month
+    - id: lincoln_days
+      slot: earliest_delivery_days
+      value: '3'
+      text: We could deliver in 3 business days.
+      reveal_when: asked how soon they could deliver
+    - id: lincoln_contact
+      slot: contact_name
+      value: Priya
+      text: This is Priya in intake.
+      reveal_when: asked who they are speaking with
+    - id: lincoln_reserve
+      slot: reserve_unit
+      value: 'yes'
+      text: Yes, we'll hold a K0001 chair for her.
+      reveal_when: asked to hold a unit
+    - id: lincoln_ref
+      slot: reference_number
+      value: LPD-2208
+      text: Your reference number is LPD-2208.
+      reveal_when: asked for a reference number
+    - id: lincoln_order_received
+      slot: order_received
+      value: 'yes'
+      text: Yes, we have the signed order from Dr. Chen's office.
+      reveal_when: asked whether the order arrived
+    - id: lincoln_slot
+      slot: delivery_slot
+      value: in 2 days at 1 PM
+      text: We can deliver in 2 days at 1 PM.
+      reveal_when: asked when they can deliver
+    - id: lincoln_delivered
+      slot: delivered
+      value: 'yes'
+      text: Yes, our driver delivered it and she signed for it.
+      reveal_when: asked whether it was delivered
+    sim:
+      ghost_after: never
+ground_truth:
+  claim_would_pass: true
+  lcd_supported: true
+  hcpcs: K0001
+expect:
+  final: DONE
+  escalations: []
+  max_sim_days: 14
