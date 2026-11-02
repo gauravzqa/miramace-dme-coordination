@@ -207,8 +207,15 @@ def verified_doc_claims(doc: InboundDoc, claims: list[Claim], out: _Out) -> list
 
 
 def _bool(claims: dict[str, Claim], field: str) -> bool | None:
+    """Yes/no from the extracted value; if the model returned a non-boolean value (e.g. 'K0001 chair' for
+    reserve_unit), fall back to the verified counterparty quote ('Yes, we can hold a K0001 chair')."""
     c = claims.get(field)
-    return rules.parse_bool(c.value) if c else None
+    if c is None or c.status != "stated":
+        return None
+    v = rules.parse_bool(c.value)
+    if v is None and c.evidence_quote:
+        v = rules.parse_bool(c.evidence_quote)
+    return v
 
 
 def _val(claims: dict[str, Claim], field: str) -> str | None:

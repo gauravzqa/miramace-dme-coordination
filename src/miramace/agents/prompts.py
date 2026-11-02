@@ -234,6 +234,12 @@ FIELD_GUIDE: dict[str, str] = {
     "accepts_assignment_all_months": "accepts Medicare assignment for every rental month ('yes'/'no')",
     "earliest_delivery_days": "earliest delivery, in days from now, as an integer",
     "contact_name": "name of the person the caller spoke to",
+    "reserve_unit": "whether they agreed to hold/reserve a K0001 wheelchair for her ('yes'/'no')",
+    "reference_number": "hold / reference number they gave, as said",
+    "order_received": "whether they received the signed order from the doctor's office ('yes'/'no')",
+    "will_fax_order": "whether the office agreed to fax the order and note to the supplier ('yes'/'no')",
+    "delivered": "whether the wheelchair was delivered ('yes'/'no')",
+    "delivery_slot": "the earliest delivery day/time they offered, as said (e.g. 'Thursday 10am-12pm')",
 }
 
 

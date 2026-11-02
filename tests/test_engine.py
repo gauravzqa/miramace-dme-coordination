@@ -353,3 +353,15 @@ def test_scenarios_load_and_validate():
                 "personas": {LAKE: {"role": "supplier", "org_name": "Wrong Name", "answerer_name": "T"}},
             }
         )
+
+
+def test_bool_claim_falls_back_to_quote_when_value_not_yes_no():
+    """Live-run regression: model returned reserve_unit='K0001 chair' (quote 'Yes, we can hold a K0001 chair')."""
+    from miramace.interpret import _bool
+    from miramace.models import Claim
+
+    cl = {"reserve_unit": Claim(field="reserve_unit", status="stated", value="K0001 chair",
+                                evidence_quote="Yes, we can hold a K0001 chair for her.")}
+    assert _bool(cl, "reserve_unit") is True
+    cl2 = {"reserve_unit": Claim(field="reserve_unit", status="unknown", value=None, evidence_quote=None)}
+    assert _bool(cl2, "reserve_unit") is None
