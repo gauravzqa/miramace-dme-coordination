@@ -48,7 +48,7 @@ def test_round_trip_file_db(tmp_path):
         stored = s.append_many(log.events)
         assert [e.seq for e in stored] == list(range(1, len(log.events) + 1))
         mode = s._db.execute("PRAGMA journal_mode").fetchone()[0]
-        assert mode.lower() in ("delete", "wal")  # WAL is opt-in (MIRA_SQLITE_WAL=1)
+        assert mode.lower() in ("truncate", "wal")  # WAL is opt-in (MIRA_SQLITE_WAL=1)
         expected = s.state(CASE)
     with Store(db) as s2:  # fresh process view: rebuilt from events only
         evs = s2.events(CASE)

@@ -87,8 +87,10 @@ class Store:
         if self.path != ":memory:":
             # Single-process tool: classic rollback journal works on every filesystem (WAL fails on
             # some shared/network mounts with "disk I/O error"). Opt in with MIRA_SQLITE_WAL=1.
-            if os.getenv("MIRA_SQLITE_WAL") == "1":
-                self._db.execute("PRAGMA journal_mode=WAL")
+            # TRUNCATE (not DELETE) so commits never unlink the journal file — works in folders where
+            # deletion is restricted (sandboxed/shared mounts).
+            mode = "WAL" if os.getenv("MIRA_SQLITE_WAL") == "1" else "TRUNCATE"
+            self._db.execute(f"PRAGMA journal_mode={mode}")
         self._db.execute("PRAGMA foreign_keys=ON")
         self._db.executescript(SCHEMA)
         self._states: dict[str, CaseState] = {}
