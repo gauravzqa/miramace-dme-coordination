@@ -373,7 +373,7 @@ def make_brain_agent_cls() -> type:
 
 TURN_HANDLING: dict[str, Any] = {
     "turn_detection": "vad",  # default is inference.TurnDetector() → LiveKit Cloud
-    "endpointing": {"min_delay": 0.7, "max_delay": 3.0},
+    "endpointing": {"min_delay": 1.2, "max_delay": 4.0},  # live run: 0.7 s split multi-sentence turns
     "interruption": {"enabled": False},
     "preemptive_generation": {"enabled": False},
 }
@@ -405,7 +405,7 @@ def _make_session(side: Side, task: CallTask) -> Any:
             voice=voice,
             instructions=_TTS_STYLE[side],
         ),
-        vad=inference.VAD(model="silero", min_silence_duration=0.5),
+        vad=inference.VAD(model="silero", min_silence_duration=0.9),
         turn_handling=TURN_HANDLING,
         user_away_timeout=None,
     )
