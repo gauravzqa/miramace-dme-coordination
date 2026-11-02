@@ -386,8 +386,10 @@ def _pcp_followup(
     re-opened with the new due). No answer / no new promise -> COMMITMENT_BROKEN only (F1 rule b)."""
     cid = task.args.get("cid")
     open_ = cid in s.commitments and s.commitments[cid].status == "OPEN"
+    # F1 contract: an unanswered follow-up advances the ladder even when the promise is already BROKEN.
+    live = cid in s.commitments and s.commitments[cid].status in ("OPEN", "BROKEN")
     if not answered:
-        if open_:
+        if live:
             out.add(ET.COMMITMENT_BROKEN, {"cid": cid})
         return
     received = _bool(cl, "request_received")
@@ -395,12 +397,12 @@ def _pcp_followup(
     if received is False:
         if OrderStatus(s.order.state) == OrderStatus.REQUESTED:
             out.add(ET.ORDER_REQUEST_VERIFIED, {"received": False, "named_owner": owner})
-        elif open_:
+        elif live:
             out.add(ET.COMMITMENT_BROKEN, {"cid": cid})
         return
     if received is True:
         out.add(ET.ORDER_REQUEST_VERIFIED, {"received": True, "named_owner": owner})
-    if not open_:
+    if not live:
         return
     out.add(ET.COMMITMENT_BROKEN, {"cid": cid})
     due = parse_when(_val(cl, "promised_by"), now)

@@ -201,8 +201,13 @@ def _open_escalations(s: CaseState, track: Track | None = None) -> list:
 
 
 def _close_commitments(s: CaseState, party: str, status: CommitmentStatus = CommitmentStatus.KEPT) -> None:
+    """Close the party's OPEN commitments. KEPT/CANCELLED also close BROKEN ones (a late delivery still
+    fulfils a broken promise; the planner keeps following up on the latest BROKEN PCP promise otherwise)."""
+    closable = {CommitmentStatus.OPEN}
+    if status in (CommitmentStatus.KEPT, CommitmentStatus.CANCELLED):
+        closable.add(CommitmentStatus.BROKEN)
     for c in s.commitments.values():
-        if c.party == party and c.status == CommitmentStatus.OPEN:
+        if c.party == party and c.status in closable:
             c.status = status
 
 
@@ -389,6 +394,7 @@ def _patient_notified(s: CaseState, e: Event) -> None:
     assert isinstance(p, PatientNotified)
     s.last_notified_at = e.sim_time
     s.notify_attempts = 0 if p.answered else s.notify_attempts + 1
+    s.notify_counts[p.purpose] = s.notify_counts.get(p.purpose, 0) + 1
     if p.purpose in s.pending_notify:
         s.pending_notify.remove(p.purpose)
 
@@ -513,6 +519,7 @@ def _addendum_requested(s: CaseState, e: Event) -> None:
     ):
         raise _illegal(e, f"order is {s.order.state}")
     s.addendum_requests += 1
+    s.addendum_notes_seen = len(s.visit_notes)
 
 
 def _swo_signed_received(s: CaseState, e: Event) -> None:
@@ -523,7 +530,9 @@ def _swo_signed_received(s: CaseState, e: Event) -> None:
         raise _illegal(e, f"order is {st}")
     s.swo = p.swo
     s.swo_missing = []  # re-evaluated by SWO_EVALUATED
-    _close_commitments(s, PCP_PARTY_ID)
+    addendum_outstanding = s.addendum_requests > 0 and len(s.visit_notes) <= s.addendum_notes_seen
+    if not addendum_outstanding:  # the addendum promise stays open until a note arrives
+        _close_commitments(s, PCP_PARTY_ID)
     if st != OrderStatus.BLOCKED_ON_HUMAN:
         s.order.state = OrderStatus.SIGNED
 
@@ -583,6 +592,8 @@ def _order_received(s: CaseState, e: Event) -> None:
         raise _illegal(e, f"order was sent to {s.order_sent_to!r}, not {p.by_sid!r}")
     s.order_received_by = p.by_sid
     s.order.state = OrderStatus.RECEIVED_BY
+    if p.by_sid in s.suppliers and s.suppliers[p.by_sid].status == SupplierStatus.COMMITTED:
+        s.suppliers[p.by_sid].attempts = 0  # successful contact resets the post-commit failure count
     _close_commitments(s, PCP_PARTY_ID)
     _close_commitments(s, p.by_sid)
 
@@ -618,8 +629,13 @@ def _supplier_no_answer(s: CaseState, e: Event) -> None:
     p = e.parsed()
     assert isinstance(p, SupplierNoAnswer)
     rec = _record(s, e, p.sid)
+    if rec.status == SupplierStatus.COMMITTED:
+        # reverify / verify_order_received went unanswered: count failures since commit (status unchanged);
+        # the planner releases after Policy.reverify_attempts failures.
+        rec.attempts += 1
+        return
     if rec.status not in PRE_QUALIFIED:
-        return  # e.g. no answer on a reverify call: tracked by the planner, not here
+        return
     rec.attempts = max(rec.attempts + 1, p.attempt)
     rec.status = (
         SupplierStatus.UNREACHABLE if rec.attempts >= MAX_SCREEN_ATTEMPTS else SupplierStatus.NO_ANSWER
@@ -662,6 +678,7 @@ def _supplier_committed(s: CaseState, e: Event) -> None:
     if s.assignment_by_sid.get(p.sid) != AssignmentStatus.CONFIRMED_ALL_MONTHS:
         raise _illegal(e, f"assignment not confirmed for {p.sid!r}")
     rec.status, rec.ref, rec.expires_at = SupplierStatus.COMMITTED, p.ref, p.expires_at
+    rec.attempts = 0  # from here on `attempts` counts unanswered reverify/verify calls since commit
 
 
 def _supplier_reverified(s: CaseState, e: Event) -> None:
@@ -670,6 +687,8 @@ def _supplier_reverified(s: CaseState, e: Event) -> None:
     rec = _record(s, e, p.sid)
     if rec.status in (SupplierStatus.QUALIFIED, SupplierStatus.COMMITTED):
         rec.verified_at = p.verified_at
+        if rec.status == SupplierStatus.COMMITTED:
+            rec.attempts = 0
 
 
 def _supplier_released(s: CaseState, e: Event) -> None:
@@ -714,6 +733,8 @@ def _slot_proposed(s: CaseState, e: Event) -> None:
     s.delivery.state = DeliveryStatus.SCHEDULING
     s.delivery.due_at = None
     s.delivery_slot = p.slot
+    s.slot_proposals += 1
+    s.notify_counts["delivery_slot"] = 0  # the delivery_slot ask ladder restarts for each proposed slot
 
 
 def _delivery_scheduled(s: CaseState, e: Event) -> None:
@@ -730,8 +751,13 @@ def _delivery_scheduled(s: CaseState, e: Event) -> None:
 
 
 def _delivery_missed(s: CaseState, e: Event) -> None:
-    if s.delivery.state != DeliveryStatus.SCHEDULED:
-        raise _illegal(e, f"delivery is {s.delivery.state}, not SCHEDULED")
+    """SCHEDULED: delivery missed / patient moves it. SCHEDULING with a proposed slot: patient declined it.
+    Either way the slot is cleared and the planner re-proposes (propose_slot v = slot_proposals + 1)."""
+    ok = s.delivery.state == DeliveryStatus.SCHEDULED or (
+        s.delivery.state == DeliveryStatus.SCHEDULING and s.delivery_slot is not None
+    )
+    if not ok:
+        raise _illegal(e, f"delivery is {s.delivery.state}, not SCHEDULED or a proposed slot")
     s.delivery.state = DeliveryStatus.SCHEDULING
     s.delivery.due_at = None
     s.delivery_slot = None
@@ -792,7 +818,8 @@ def _commitment_broken(s: CaseState, e: Event) -> None:
     c = s.commitments.get(p.cid)
     if c is None:
         raise _illegal(e, f"unknown commitment {p.cid!r}")
-    if c.status == CommitmentStatus.OPEN:
+    if c.status in (CommitmentStatus.OPEN, CommitmentStatus.BROKEN):
+        # every failed follow-up counts (OPEN past due, or still BROKEN after an unanswered follow-up)
         c.status = CommitmentStatus.BROKEN
         c.followups += 1
 

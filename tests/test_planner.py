@@ -23,6 +23,7 @@ from miramace.models import (
     SupplierTrackStatus,
     TaskKind,
     TrackState,
+    VisitNote,
     dr_chen,
     eleanor,
 )
@@ -206,7 +207,8 @@ def test_welcome_ladder_and_unreachable():
     night = datetime(2026, 11, 2, 22, tzinfo=CHICAGO)
     t = by_intent(plan(consented(**base), night))[("patient", "welcome_intake")]
     assert t.version == 1 and t.due_at == datetime(2026, 11, 3, 9, tzinfo=CHICAGO)
-    s = consented(**base, notify_attempts=3, last_notified_at=SIM_START)
+    # ladder position = sends of this purpose (notify_counts), so answered-but-incomplete replies re-ask too
+    s = consented(**base, notify_counts={"welcome_intake": 3}, last_notified_at=SIM_START)
     dec = plan(s, SIM_START + timedelta(hours=5))
     assert not [t for t in dec.tasks if t.kind == TaskKind.NOTIFY_PATIENT]
     esc = [e for e in dec.events if e.type == EventType.ESCALATION_OPENED][0].parsed().escalation
@@ -214,7 +216,7 @@ def test_welcome_ladder_and_unreachable():
     prof = eleanor().profile.model_copy(update={"caregiver_phone": "(312) 555-0100"})
     s = consented(
         **{**base, "patient_info": eleanor().model_copy(update={"profile": prof})},
-        notify_attempts=3,
+        notify_counts={"welcome_intake": 3},
         last_notified_at=SIM_START,
     )
     t = by_intent(plan(s, SIM_START + timedelta(hours=5)))[("patient", "welcome_intake")]
@@ -230,7 +232,11 @@ def test_lcd_missing_addendum_then_escalate():
     s = consented(order=TrackState(state=OrderStatus.DOCS_CHECK), lcd=lcd, order_request_version=1)
     t = by_intent(plan(s, SIM_START))[("pcp", "request_addendum")]
     assert t.args["missing"] == ["HOME_ACCOMMODATES"] and t.args["wording"]
-    s = s.model_copy(update={"addendum_requests": 1})
+    s = s.model_copy(update={"addendum_requests": 1, "addendum_notes_seen": 0})
+    dec = plan(s, SIM_START)  # requested, no note since: wait (no re-request, no escalation)
+    assert ("pcp", "request_addendum") not in by_intent(dec) and not esc_triggers(dec)
+    note = VisitNote(doc_id="add-1", text="addendum", received_at=SIM_START, is_addendum=True)
+    s = s.model_copy(update={"visit_notes": [note]})  # a note arrived AFTER the request; gap remains
     dec = plan(s, SIM_START)
     assert ("pcp", "request_addendum") not in by_intent(dec)
     assert esc_triggers(dec)[-1] == EscalationTrigger.LCD_MISSING_AFTER_ADDENDUM
@@ -292,7 +298,9 @@ def test_commit_cost_and_send_order():
     assert ("patient", "cost_disclosure") in tasks
     assert tasks[("pcp", f"send_order_{LAKE}")].args == {"to_sid": LAKE}
     assert (LAKE, "reverify") in tasks  # lease renewal timer
-    assert tasks[(LAKE, "reverify")].due_at < SIM_START + timedelta(hours=72)
+    rev = sorted(t.due_at for t in plan(committed_state(), SIM_START).tasks if t.intent == "reverify")
+    end = SIM_START + timedelta(hours=72)
+    assert len(rev) == 2 and rev[0] < end <= rev[1]  # renewal before lease end + wake-up at lease end
 
 
 def test_lease_expiry_releases_and_redirects():
@@ -342,3 +350,129 @@ def test_schedule_flow_and_done():
 
 def test_policy_default_is_frozen():
     assert Policy().lease_h == 72 and Policy().pcp_followup_offsets_bh == (24, 48, 72)
+
+
+# ------------------------------------------------------------------ F1: liveness fixes (event-driven)
+from miramace.events import Source, make_event  # noqa: E402
+from miramace.models import CostInfo, SupplierFacts  # noqa: E402
+from miramace.reducer import initial_state, reduce  # noqa: E402
+
+_ET = EventType
+_GOOD = SupplierFacts(
+    taking_new_medicare=True, k0001_in_stock=True, delivers_to_zip=True, accepts_assignment_all_months=True
+)
+
+
+class _Log:
+    def __init__(self) -> None:
+        self.now = SIM_START
+        self.state = initial_state("c1", eleanor(), dr_chen())
+
+    def add(self, t, payload=None):
+        e = make_event("c1", t, payload, Source(kind="SYSTEM", ref="t"), self.now)
+        self.state = reduce(self.state, e.model_copy(update={"seq": self.state.last_seq + 1}))
+        return self
+
+    def apply_plan(self):
+        dec = plan(self.state, self.now)
+        for e in dec.events:
+            self.state = reduce(self.state, e.model_copy(update={"seq": self.state.last_seq + 1}))
+        return dec
+
+
+def _committed_log() -> _Log:
+    g = _Log()
+    g.add(_ET.ADDRESS_CONFIRMED, {"address": ADDR}).add(_ET.CONSENT_GIVEN, {"scope": "x"})
+    g.apply_plan()
+    a, b = g.state.ranked[:2]
+    g.add(_ET.SUPPLIER_QUALIFIED, {"sid": a, "facts": _GOOD, "verified_at": g.now})
+    g.add(_ET.SUPPLIER_QUALIFIED, {"sid": b, "facts": _GOOD, "verified_at": g.now})
+    g.add(_ET.SUPPLIER_COMMITTED, {"sid": a, "ref": "r", "expires_at": g.now + timedelta(hours=72)})
+    return g
+
+
+def test_two_unanswered_reverifies_release_committed_supplier():
+    g = _committed_log()
+    a = g.state.committed_sid
+    v0 = {t.idem_key for t in plan(g.state, g.now).tasks if t.intent == "reverify"}
+    g.add(_ET.SUPPLIER_NO_ANSWER, {"sid": a, "attempt": 1})
+    assert g.state.suppliers[a].status == SupplierStatus.COMMITTED and g.state.suppliers[a].attempts == 1
+    v1 = {t.idem_key for t in plan(g.state, g.now).tasks if t.intent == "reverify"}
+    assert v1 - v0  # retry gets a fresh key
+    g.add(_ET.SUPPLIER_NO_ANSWER, {"sid": a, "attempt": 2})
+    dec = g.apply_plan()
+    assert [e.type for e in dec.events] == [_ET.SUPPLIER_RELEASED]
+    assert g.state.committed_sid is None
+
+
+def test_verify_order_received_replanned_after_no_answer():
+    g = _committed_log()
+    a = g.state.committed_sid
+    s = g.state.model_copy(
+        update={"order": TrackState(state=OrderStatus.SENT_TO, owner=Owner.SUPPLIER), "order_sent_to": a}
+    )
+
+    def keys():
+        return {(t.party_id, t.intent, t.version) for t in plan(s, g.now).tasks}
+
+    assert (a, "verify_order_received", 1) in keys()
+    s.suppliers[a].attempts = 1
+    assert (a, "verify_order_received", 2) in keys()
+
+
+def test_cost_disclosure_ladder_then_unreachable():
+    g = _committed_log()
+    for i in range(3):
+        g.add(
+            _ET.PATIENT_NOTIFIED,
+            {"purpose": "cost_disclosure", "text": "x", "grounding_ok": True, "answered": False},
+        )
+        g.add(_ET.COST_DISCLOSED, {"cost": CostInfo()})
+        t = [t for t in plan(g.state, g.now).tasks if t.intent == "cost_disclosure"]
+        if i < 2:
+            assert t and t[0].version == i + 2 and t[0].due_at >= g.state.patient.due_at
+    dec = plan(g.state, g.now)
+    assert esc_triggers(dec) == [EscalationTrigger.PATIENT_UNREACHABLE]
+
+
+def test_patient_declines_slot_reschedule_reproposes():
+    g = _committed_log()
+    a = g.state.committed_sid
+    g.add(_ET.DELIVERY_SLOT_PROPOSED, {"sid": a, "slot": g.now + timedelta(days=2)})
+    g.add(_ET.DELIVERY_MISSED)  # `reschedule` intent while a slot is proposed
+    assert g.state.delivery.state == DeliveryStatus.SCHEDULING and g.state.delivery_slot is None
+    s = g.state.model_copy(
+        update={
+            "patient": TrackState(state=PatientStatus.COST_ACCEPTED),
+            "patient_flags": g.state.patient_flags | {"cost_disclosed", "cost_accepted"},
+            "order": TrackState(state=OrderStatus.RECEIVED_BY),
+            "order_sent_to": a,
+            "order_received_by": a,
+        }
+    )
+    assert (a, "propose_slot", 2) in {(t.party_id, t.intent, t.version) for t in plan(s, g.now).tasks}
+
+
+def test_broken_pcp_promise_keeps_ladder_then_stalls():
+    g = _Log()
+    g.add(_ET.ADDRESS_CONFIRMED, {"address": ADDR}).add(_ET.CONSENT_GIVEN, {"scope": "x"})
+    g.add(_ET.ORDER_REQUESTED, {"request_ref": "q", "version": 1})
+    due = g.now + timedelta(hours=24)
+    g.add(_ET.COMMITMENT_MADE, {"cid": "c-v1", "party": "pcp", "what": "fax", "due_at": due})
+    for k in (1, 2, 3):
+        assert ("pcp", f"followup_order_{k}") in by_intent(plan(g.state, g.now))
+        g.add(_ET.COMMITMENT_BROKEN, {"cid": "c-v1"})  # unanswered follow-up
+    assert esc_triggers(plan(g.state, g.now)) == [EscalationTrigger.ORDER_STALLED]
+
+
+def test_signed_swo_keeps_outstanding_addendum_promise_open():
+    g = _Log()
+    g.add(_ET.ADDRESS_CONFIRMED, {"address": ADDR}).add(_ET.CONSENT_GIVEN, {"scope": "x"})
+    g.add(_ET.ORDER_REQUESTED, {"request_ref": "q", "version": 1})
+    g.add(_ET.VISIT_NOTE_RECEIVED, {"note": VisitNote(doc_id="n1", text="n", received_at=g.now)})
+    g.add(_ET.ADDENDUM_REQUESTED, {"missing": [LCDCriterion.HOME_ACCOMMODATES]})
+    g.add(_ET.COMMITMENT_MADE, {"cid": "add-1", "party": "pcp", "what": "addendum", "due_at": g.now})
+    g.add(_ET.SWO_SIGNED_RECEIVED, {"swo": full_swo()})
+    assert g.state.commitments["add-1"].status == "OPEN"
+    g.add(_ET.VISIT_NOTE_RECEIVED, {"note": VisitNote(doc_id="n2", text="a", received_at=g.now)})
+    assert g.state.commitments["add-1"].status == "KEPT"

@@ -3,12 +3,22 @@ import pytest
 from miramace.clock import SIM_START
 from miramace.escalation import CATALOGUE, EFFECTS, open_escalation, option_ids, resolve
 from miramace.events import EventType
-from miramace.models import SWO, CaseState, Escalation, EscalationLane, EscalationTrigger, Track
+from miramace.models import (
+    SWO,
+    CaseState,
+    EscalationLane,
+    EscalationTrigger,
+    PatientStatus,
+    Track,
+    TrackState,
+)
+from miramace.reducer import reduce
 
 
 def with_esc(state: CaseState, ev) -> CaseState:
-    esc = Escalation.model_validate(ev.payload["escalation"])
-    return state.model_copy(update={"escalations": {**state.escalations, esc.eid: esc}})
+    # reduce (not just insert) so the state is one the reducer could actually be in: resolve() dry-runs
+    # its batch through the reducer and drops effects that would be illegal.
+    return reduce(state, ev.model_copy(update={"seq": state.last_seq + 1}))
 
 
 def test_catalogue_complete_and_effects_valid():
@@ -33,16 +43,24 @@ def test_open_and_resolve_roundtrip():
         == ev
     )
 
-    s2 = with_esc(s, ev)
+    consented = s.model_copy(
+        update={"patient": TrackState(state=PatientStatus.CONSENTED), "patient_flags": {"address", "consent"}}
+    )
+    s2 = with_esc(consented, ev)
     with pytest.raises(ValueError):
         resolve(s2, esc.eid, "pcp_corrected_to_K0001", None, "nurse", SIM_START)
     with pytest.raises(ValueError):
         resolve(s2, "esc-nope-1", "patient_declined", None, "nurse", SIM_START)
 
     out = resolve(s2, esc.eid, "nurse_resolved_accepted", "talked it through", "nurse", SIM_START)
-    assert [e.type for e in out] == [EventType.HUMAN_RESOLVED, EventType.COST_ACCEPTED]
+    # concern raised before disclosure: the nurse call is the disclosure, then acceptance
+    ET = EventType
+    assert [e.type for e in out] == [ET.HUMAN_RESOLVED, ET.COST_DISCLOSED, ET.COST_ACCEPTED]
     assert all(e.source.kind == "HUMAN" and e.source.ref == esc.eid for e in out)
     assert out[1].causation_id == out[0].event_id
+    # not consented yet: effects would be illegal -> only HUMAN_RESOLVED, with an explanatory note
+    out = resolve(with_esc(s, ev), esc.eid, "nurse_resolved_accepted", None, "nurse", SIM_START)
+    assert [e.type for e in out] == [EventType.HUMAN_RESOLVED] and "manually" in out[0].payload["note"]
 
     out = resolve(s2, esc.eid, "patient_declined", None, "nurse", SIM_START)
     assert out[1].type == EventType.CASE_CANCELLED
@@ -73,3 +91,11 @@ def test_order_stalled_effect_new_commitment_and_noop_options():
     assert out[1].parsed().due_at > SIM_START
     s = with_esc(s, open_escalation(EscalationTrigger.SUPPLIERS_EXHAUSTED, s, SIM_START, {}))
     assert len(resolve(s, "esc-suppliers_exhausted-1", "advocate_found_supplier", None, "a", SIM_START)) == 1
+
+
+def test_code_drift_proceed_manual_cancels_case():
+    s = CaseState(case_id="c1", swo=SWO(hcpcs="K0003", signed=True))
+    s = with_esc(s, open_escalation(EscalationTrigger.CODE_DRIFT, s, SIM_START, {"hcpcs": "K0003"}))
+    out = resolve(s, "esc-code_drift-1", "proceed_new_code_manual", None, "advocate", SIM_START)
+    assert [e.type for e in out] == [EventType.HUMAN_RESOLVED, EventType.CASE_CANCELLED]
+    assert "non-K0001" in out[1].payload["reason"]

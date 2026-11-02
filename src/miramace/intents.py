@@ -246,8 +246,10 @@ class IntentAPI:
             return [(ET.DELIVERY_SCHEDULED, DeliveryScheduled(sid=sid, slot=state.delivery_slot))], None
 
         if k == "reschedule":
-            if state.delivery.state != DeliveryStatus.SCHEDULED:
-                return "no delivery is scheduled to move"
+            proposed = state.delivery.state == DeliveryStatus.SCHEDULING and state.delivery_slot is not None
+            if state.delivery.state != DeliveryStatus.SCHEDULED and not proposed:
+                return "no delivery time is proposed or scheduled to move"
+            # declined proposal or moving a scheduled delivery: slot cleared, planner re-proposes
             return [(ET.DELIVERY_MISSED, None)], None
 
         if k == "delivery_confirmed":

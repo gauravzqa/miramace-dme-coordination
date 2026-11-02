@@ -630,6 +630,12 @@ class CaseState(_Model):
     escalations: dict[str, Escalation] = Field(default_factory=dict)
     last_notified_at: datetime | None = None
     notify_attempts: int = 0
+    # F1 (additive): PATIENT_NOTIFIED sends per purpose (delivery_slot is reset per proposed slot) -> fresh
+    # notify versions; DELIVERY_SLOT_PROPOSED count -> propose_slot versions; visit notes seen when the last
+    # addendum was requested (LCD escalation only after a note arrives AFTER the request).
+    notify_counts: dict[str, int] = Field(default_factory=dict)
+    slot_proposals: int = 0
+    addendum_notes_seen: int = 0
     pending_notify: list[str] = Field(default_factory=list)
     patient_flags: set[str] = Field(default_factory=set)  # seen: "address", "consent"
     resume_to: str | None = None  # patient state to restore after CONCERN_RAISED resolves

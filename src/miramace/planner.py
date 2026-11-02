@@ -11,34 +11,48 @@ decision suppresses supplier/order/delivery tasks until the next plan:
   4 LCD addendum → LCD_MISSING_AFTER_ADDENDUM   5 CODE_DRIFT / correction → SWO_INCOMPLETE_AFTER_CORRECTION,
     ORDER_VALIDATED   6 rank + screen (one in flight, stop at 2 qualified) → SUPPLIERS_EXHAUSTED
   7 commit   8 cost_disclosure   9 send_order_<sid>   10 verify_order_received   11 reverify / propose_slot /
-  delivery_slot notify   12 lease expiry → SUPPLIER_RELEASED (+ORDER_REDIRECT)   13 verify_delivered
+  delivery_slot notify   12 lease end / ≥2 unanswered reverify|verify → SUPPLIER_RELEASED (+ORDER_REDIRECT)
+  13 verify_delivered
   14 delivered_checkin, CASE_DONE.
 
 Task conventions (party_id, intent, version, args) — executor/interpret code against these:
   CALL_PCP (party "pcp"):
     request_order            v = order_request_version + 1        args {request_version}
-    followup_order_{k}       k = Commitment.followups + 1 (1..3); v = 1-based index of the commitment among
-                             PCP commitments (dict order); due = add_business_hours(c.due_at, 24/48/72)
+    followup_order_{k}       target = earliest OPEN PCP commitment, else the latest PCP commitment if BROKEN;
+                             k = max(followups + 1, rungs whose time has passed) (1..3; a 4th virtual rung at
+                             due+96bh means "silent throughout" → ORDER_STALLED, as does followups ≥ 3);
+                             v = 100*(order_request_version-1) + 1-based index of the commitment among PCP
+                             commitments (dict order); due = add_business_hours(c.due_at, 24/48/72)
                              args {cid, what, k}
+                             CONTRACT (interpret): fresh cid per request/resend; unanswered follow-up or one
+                             with no new promise emits COMMITMENT_BROKEN(cid) (bumps followups); a new promise
+                             re-makes the SAME cid (followups preserved) with the new due.
     request_addendum         v = addendum_requests + 1            args {missing: [criterion], wording: [str]}
     request_correction       v = correction_requests + 1          args {fields: [str]}
     send_order_{sid}         v = 1                                args {to_sid}
   CALL_SUPPLIER (party = sid):
     screen                   v = attempts + 1; NO PHI in args     args {zip, item, payer, rank, distance_mi}
     commit                   v = 1; PHI allowed later by executor args {zip, lease_h}
-    verify_order_received    v = 1                                args {}
-    reverify                 v = 2*m (lease renewal, due lease_end - lead) or 2*m+1 (pre-scheduling freshness,
-                             due now), m = minutes from SIM_START to the record's verified_at   args {reason}
-    propose_slot             v = 1, or 1 + minutes-stamp of the previous slot                  args {}
+    verify_order_received    v = 1 + failures since commit (SupplierRecord.attempts) args {}
+    reverify                 v = 10*m + 2*f (lease renewal, due lease_end - lead + f h), 10*m + 2*f + 1
+                             (pre-scheduling freshness, due now), 10*m + 9 (lease-end wake-up timer, due
+                             lease_end: the loop wakes there and rule 12 releases), m = minutes from SIM_START
+                             to verified_at, f = unanswered reverify/verify calls since commit (reducer counts
+                             SUPPLIER_NO_ANSWER on a COMMITTED record); f ≥ 2 → rule 12 releases args {reason}
+    propose_slot             v = slot_proposals + 1 (re-proposed after decline/miss/lapsed slot)  args {}
     verify_delivered         v = 1 + minutes-stamp of the slot                                 args {slot}
   NOTIFY_PATIENT (party "patient"; intent = NotifyPurpose):
-    welcome_intake / cost_disclosure   v = notify_attempts + 1; v ≤ 3 to patient, v = 4 to caregiver (if a
-                                       caregiver phone is known), then PATIENT_UNREACHABLE  args {purpose, to}
-    delivery_slot            v = 10*stamp(slot) + notify_attempts + 1 (same ladder)  args {purpose, to, slot}
+    welcome_intake / cost_disclosure   v = n + 1, n = notify_counts[purpose] (sends so far, answered or not:
+                                       a re-ask always gets a fresh key); n < 3 to patient, n = 3 to caregiver
+                                       (if a caregiver phone is known), then PATIENT_UNREACHABLE (a resolved
+                                       escalation restarts the ladder)  args {purpose, to}
+                                       welcome is re-asked while INTAKE (e.g. address given, consent missing);
+                                       cost_disclosure is re-sent in COST_DISCLOSED at patient.due_at.
+    delivery_slot            v = 1000*slot_proposals + n + 1 (n reset per slot)  args {purpose, to, slot}
     delivered_checkin        v = 1; capped to 1 notify per sim day                    args {purpose, to}
 
-Assumptions on reducer semantics (B1): `notify_attempts` = consecutive unanswered notifications (reset when
-the patient answers); `last_notified_at` updated on every PATIENT_NOTIFIED; `Commitment.followups` bumped when
+Assumptions on reducer semantics (B1): `notify_counts[purpose]` = sends per purpose; `last_notified_at`
+updated on every PATIENT_NOTIFIED; `Commitment.followups` bumped when
 a follow-up call for that commitment completes; ORDER_REQUEST_VERIFIED(received=False) returns order to
 NOT_SENT so rule 2 re-sends with a bumped version; `assignment_by_sid` filled by ASSIGNMENT_CONFIRMED.
 Escalation de-dup: a trigger is never re-opened while one is OPEN, nor re-opened for the same situation
@@ -248,32 +262,54 @@ def _best_backup(s: CaseState, exclude: str) -> str | None:
 
 
 def _patient_notify(
-    c: _Ctx, purpose: str, track: Track, version_base: int = 0, extra: dict[str, Any] | None = None
+    c: _Ctx,
+    purpose: str,
+    track: Track,
+    version_base: int = 0,
+    extra: dict[str, Any] | None = None,
+    not_before: datetime | None = None,
 ) -> None:
-    """Action-required notify with the unreachable ladder: 3 tries → caregiver → PATIENT_UNREACHABLE."""
+    """Action-required notify with the ladder: 3 sends → caregiver → PATIENT_UNREACHABLE.
+
+    n = sends of this purpose so far (answered or not), so an answered-but-incomplete reply still yields a new
+    idem key for the re-ask. Sends already counted by a RESOLVED unreachable escalation do not count again."""
     s, p = c.state, c.policy
     if c.blocked(Track.PATIENT, track):
         return
     profile = s.patient_info.profile if s.patient_info else None
-    a = s.notify_attempts
+    n = s.notify_counts.get(purpose, 0)
+    tag = f"{purpose}:{version_base}"
+    spent = max(
+        (
+            int(e.context.get("sends", 0))
+            for e in s.escalations.values()
+            if e.trigger == EscalationTrigger.PATIENT_UNREACHABLE
+            and e.status == EscalationStatus.RESOLVED
+            and e.context.get("ladder") == tag
+        ),
+        default=0,
+    )
+    m = max(0, n - spent)  # sends in the current ladder
     caregiver = bool(profile and profile.caregiver_phone)
-    if a < p.patient_attempts:
+    if m < p.patient_attempts:
         to = PATIENT_PARTY_ID
-    elif a == p.patient_attempts and caregiver:
+    elif m == p.patient_attempts and caregiver:
         to = "caregiver"
     else:
         c.escalate(
             EscalationTrigger.PATIENT_UNREACHABLE,
-            key=f"{purpose}:{version_base}",
-            context={"purpose": purpose.replace("_", " "), "attempts": a},
+            key=f"{tag}:{n}",
+            context={"purpose": purpose.replace("_", " "), "attempts": m, "ladder": tag, "sends": n},
         )
         return
     base = c.now
-    if a > 0 and s.last_notified_at is not None:
+    if m > 0 and s.last_notified_at is not None:
         base = max(c.now, s.last_notified_at + timedelta(hours=p.patient_retry_h))
+    if not_before is not None:
+        base = max(base, not_before)
     due = next_patient_time(base, profile)
     args = {"purpose": purpose, "to": to, **(extra or {})}
-    c.task(track, TaskKind.NOTIFY_PATIENT, PATIENT_PARTY_ID, purpose, version_base + a + 1, due, args)
+    c.task(track, TaskKind.NOTIFY_PATIENT, PATIENT_PARTY_ID, purpose, version_base + n + 1, due, args)
 
 
 def _capped_notify(c: _Ctx, purpose: str, track: Track, version: int) -> None:
@@ -330,19 +366,25 @@ def _r3_pcp_followups(c: _Ctx) -> None:
         return
     pcp = [cm for cm in s.commitments.values() if cm.party == PCP_PARTY_ID]
     open_ = [cm for cm in pcp if cm.status == CommitmentStatus.OPEN]
-    if not open_:
+    if open_:
+        cm = min(open_, key=lambda x: (x.due_at, x.cid))
+    elif pcp and pcp[-1].status == CommitmentStatus.BROKEN:
+        cm = pcp[-1]  # promise broken (unanswered follow-up / no new date): keep climbing the ladder
+    else:
         return
-    cm = min(open_, key=lambda x: (x.due_at, x.cid))
-    k = cm.followups + 1
-    if k > len(p.pcp_followup_offsets_bh):
+    offs = p.pcp_followup_offsets_bh
+    rungs = [add_business_hours(cm.due_at, o) for o in (*offs, offs[-1] + offs[0])]
+    k = max(cm.followups + 1, sum(1 for t in rungs if t <= c.now))
+    if k > len(offs):
         c.escalate(
             EscalationTrigger.ORDER_STALLED,
             key=cm.cid,
-            context={"cid": cm.cid, "what": cm.what, "followups": cm.followups},
+            context={"cid": cm.cid, "what": cm.what, "followups": max(cm.followups, len(offs))},
         )
         return
-    version = 1 + [x.cid for x in pcp].index(cm.cid)
-    due = add_business_hours(cm.due_at, p.pcp_followup_offsets_bh[k - 1])
+    epoch = max(0, s.order_request_version - 1)
+    version = 100 * epoch + 1 + [x.cid for x in pcp].index(cm.cid)
+    due = add_business_hours(cm.due_at, offs[k - 1])
     c.task(
         Track.ORDER,
         TaskKind.CALL_PCP,
@@ -362,6 +404,8 @@ def _r4_lcd(c: _Ctx) -> None:
     missing = s.lcd.missing
     if not missing:
         return
+    if s.addendum_requests > 0 and len(s.visit_notes) <= s.addendum_notes_seen:
+        return  # addendum requested: wait for a note received AFTER it (PCP follow-ups cover silence)
     if s.addendum_requests == 0:
         c.task(
             Track.ORDER,
@@ -483,8 +527,12 @@ def _r7_commit(c: _Ctx) -> None:
 
 def _r8_cost(c: _Ctx) -> None:
     s = c.state
-    if s.committed_sid and PatientStatus(s.patient.state) == PatientStatus.CONSENTED:
+    st = PatientStatus(s.patient.state)
+    if s.committed_sid and st == PatientStatus.CONSENTED:
         _patient_notify(c, "cost_disclosure", Track.PATIENT)
+    elif st == PatientStatus.COST_DISCLOSED:
+        # no decision yet: re-send at the decision due time (each send re-stamps due_at); ladder → unreachable
+        _patient_notify(c, "cost_disclosure", Track.PATIENT, not_before=s.patient.due_at or c.now)
 
 
 def _r9_send_order(c: _Ctx) -> None:
@@ -512,7 +560,9 @@ def _r10_verify_received(c: _Ctx) -> None:
         if cm.party == PCP_PARTY_ID and cm.status == CommitmentStatus.OPEN
     ]
     base = min(open_pcp) if open_pcp else (s.order.due_at or c.now)
-    c.task(Track.ORDER, TaskKind.CALL_SUPPLIER, s.order_sent_to, "verify_order_received", 1, c.call_due(base))
+    f = _rec(s, s.order_sent_to).attempts  # unanswered verify/reverify calls since commit
+    due = c.call_due(base) if f == 0 else add_business_hours(max(c.now, base), c.policy.screen_retry_bh)
+    c.task(Track.ORDER, TaskKind.CALL_SUPPLIER, s.order_sent_to, "verify_order_received", 1 + f, due)
 
 
 def _r11_schedule(c: _Ctx) -> None:
@@ -524,45 +574,51 @@ def _r11_schedule(c: _Ctx) -> None:
     delivery = DeliveryStatus(s.delivery.state)
     received = OrderStatus(s.order.state) == OrderStatus.RECEIVED_BY and s.order_received_by == sid
     accepted = PatientStatus(s.patient.state) == PatientStatus.COST_ACCEPTED
+    m, f = 10 * _stamp(rec.verified_at), rec.attempts  # f = unanswered calls since commit
+    slot = s.delivery_slot
+    lapsed = delivery == DeliveryStatus.SCHEDULING and slot is not None and slot <= c.now
     if delivery in _PRE_DELIVERY:
         if received and accepted:
             stale = rec.verified_at is None or c.now - rec.verified_at > timedelta(hours=p.fresh_h)
-            if stale:
+            if stale:  # e.g. slot confirmation rejected as stale: reverify, then re-ask / re-propose
+                if f < p.reverify_attempts:
+                    c.task(
+                        Track.SUPPLIER,
+                        TaskKind.CALL_SUPPLIER,
+                        sid,
+                        "reverify",
+                        m + 2 * f + 1,
+                        c.call_due(),
+                        {"reason": "pre_schedule"},
+                        max_attempts=p.reverify_attempts,
+                    )
+                return
+            if delivery == DeliveryStatus.NOT_STARTED or slot is None or lapsed:
+                v = s.slot_proposals + 1
+                c.task(Track.DELIVERY, TaskKind.CALL_SUPPLIER, sid, "propose_slot", v, c.call_due())
+        # lease renewal reverify: due shortly before the lease lapses (retry 1h later after a no-answer),
+        # plus a wake-up at lease end so the loop reaches the time at which rule 12 releases a ghost.
+        end = _lease_end(rec, p)
+        if end is not None and not (received and accepted) and f < p.reverify_attempts:
+            lead = end - timedelta(hours=p.reverify_lead_h) + timedelta(hours=f)
+            for v, due in ((m + 2 * f, c.call_due(lead)), (m + 9, c.call_due(end))):
                 c.task(
                     Track.SUPPLIER,
                     TaskKind.CALL_SUPPLIER,
                     sid,
                     "reverify",
-                    2 * _stamp(rec.verified_at) + 1,
-                    c.call_due(),
-                    {"reason": "pre_schedule"},
+                    v,
+                    due,
+                    {"reason": "lease"},
                     max_attempts=p.reverify_attempts,
                 )
-                return
-            if delivery == DeliveryStatus.NOT_STARTED or s.delivery_slot is None:
-                v = 1 + _stamp(s.delivery_slot) if s.delivery_slot else 1
-                c.task(Track.DELIVERY, TaskKind.CALL_SUPPLIER, sid, "propose_slot", v, c.call_due())
-        # lease renewal reverify (timer): due shortly before the lease lapses
-        end = _lease_end(rec, p)
-        if end is not None and not (received and accepted):
-            due = c.call_due(end - timedelta(hours=p.reverify_lead_h))
-            c.task(
-                Track.SUPPLIER,
-                TaskKind.CALL_SUPPLIER,
-                sid,
-                "reverify",
-                2 * _stamp(rec.verified_at),
-                due,
-                {"reason": "lease"},
-                max_attempts=p.reverify_attempts,
-            )
-    if delivery == DeliveryStatus.SCHEDULING and s.delivery_slot is not None:
+    if delivery == DeliveryStatus.SCHEDULING and slot is not None and not lapsed:
         _patient_notify(
             c,
             "delivery_slot",
             Track.DELIVERY,
-            version_base=10 * _stamp(s.delivery_slot),
-            extra={"slot": s.delivery_slot.isoformat()},
+            version_base=1000 * s.slot_proposals,
+            extra={"slot": slot.isoformat()},
         )
 
 
@@ -573,16 +629,18 @@ def _r12_lease(c: _Ctx) -> None:
         return
     rec = _rec(s, sid)
     end = _lease_end(rec, p)
-    if end is None:
+    if rec.attempts >= p.reverify_attempts:
+        reason = f"no answer to {rec.attempts} re-verification calls"
+    elif end is None:
         return
-    reverify_due = next_business_time(max(end - timedelta(hours=p.reverify_lead_h), rec.verified_at or end))
-    if c.now < end or c.now <= reverify_due:
-        return
-    c.event(
-        EventType.SUPPLIER_RELEASED,
-        {"sid": sid, "reason": "lease expired without re-verification"},
-        "planner:lease_expired",
-    )
+    else:
+        reverify_due = next_business_time(
+            max(end - timedelta(hours=p.reverify_lead_h), rec.verified_at or end)
+        )
+        if c.now < end or c.now <= reverify_due:
+            return
+        reason = "lease expired without re-verification"
+    c.event(EventType.SUPPLIER_RELEASED, {"sid": sid, "reason": reason}, "planner:lease_expired")
     order = OrderStatus(s.order.state)
     if s.order_sent_to == sid and order in (OrderStatus.SENT_TO, OrderStatus.RECEIVED_BY):
         backup = _best_backup(s, exclude=sid)

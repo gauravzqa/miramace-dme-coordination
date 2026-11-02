@@ -6,6 +6,8 @@
 * EFFECTS[(trigger, option_id)](state, now, note) -> follow-up events (Source HUMAN). Options not in
   EFFECTS have no follow-up events (manual / reducer restores the track, or the planner re-plans).
 * resolve(...) = HUMAN_RESOLVED + effects, after validating the eid is open and the option belongs to it.
+  The batch is dry-run through the reducer; if any effect would be illegal, only HUMAN_RESOLVED is returned
+  (its note explains that the effect must be done manually) — resolve never yields an unappendable batch.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from miramace.models import (
     SWO,
     TARGET_HCPCS,
     CaseState,
+    CostInfo,
     Escalation,
     EscalationLane,
     EscalationOption,
@@ -208,7 +211,17 @@ def _cancel(state: CaseState, now: datetime, note: str | None) -> list[Event]:
 
 
 def _cost_accepted(state: CaseState, now: datetime, note: str | None) -> list[Event]:
-    return [make_event(state.case_id, EventType.COST_ACCEPTED, None, _HUMAN, now)]
+    """State-aware: if cost was never disclosed (concern raised early), the nurse's call is the disclosure."""
+    out = []
+    if "cost_disclosed" not in state.patient_flags:
+        out.append(make_event(state.case_id, EventType.COST_DISCLOSED, {"cost": CostInfo()}, _HUMAN, now))
+    out.append(make_event(state.case_id, EventType.COST_ACCEPTED, None, _HUMAN, now))
+    return out
+
+
+def _manual_new_code(state: CaseState, now: datetime, note: str | None) -> list[Event]:
+    reason = "handled manually by advocate: non-K0001 code" + (f" ({note})" if note else "")
+    return [make_event(state.case_id, EventType.CASE_CANCELLED, {"reason": reason}, _HUMAN, now)]
 
 
 def _new_pcp_commitment(state: CaseState, now: datetime, note: str | None) -> list[Event]:
@@ -232,6 +245,7 @@ EFFECTS: dict[tuple[EscalationTrigger, str], Effect] = {
     (T.COST_CONCERN, "patient_declined"): _cancel,
     (T.CODE_DRIFT, "pcp_corrected_to_K0001"): _corrected_swo,
     (T.CODE_DRIFT, "cancel"): _cancel,
+    (T.CODE_DRIFT, "proceed_new_code_manual"): _manual_new_code,
     (T.ORDER_STALLED, "advocate_called_got_owner"): _new_pcp_commitment,
     (T.PCP_REFUSED, "advocate_resolved_with_pcp"): _new_pcp_commitment,
     (T.PCP_REFUSED, "cancel"): _cancel,
@@ -241,7 +255,7 @@ EFFECTS: dict[tuple[EscalationTrigger, str], Effect] = {
     (T.NEEDS_HUMAN, "cancel"): _cancel,
     # No follow-up events (manual, doc arrives later, or the planner re-plans):
     # SUPPLIERS_EXHAUSTED/*, EXTRACTION_CHECK_FAILED/*, ORDER_STALLED/switch_to_portal,
-    # CODE_DRIFT/proceed_new_code_manual, *_pcp_sent_*, COST_CONCERN/nurse_resolved_continue, nurse_* .
+    # *_pcp_sent_*, COST_CONCERN/nurse_resolved_continue, nurse_* .
 }
 
 
@@ -284,4 +298,22 @@ def resolve(
                     }
                 )
             )
+    err = _dry_run(state, out)
+    if err is not None:
+        msg = f"automatic follow-up not applied ({err}); handle manually"
+        payload = {**hr.payload, "note": f"{note}; {msg}" if note else msg}
+        return [hr.model_copy(update={"payload": payload})]
     return out
+
+
+def _dry_run(state: CaseState, events: list[Event]) -> str | None:
+    """Reduce `events` on a copy of `state`; return the first guard failure, else None."""
+    from miramace.reducer import IllegalTransition, reduce  # local: reducer must not depend on escalation
+
+    st = state
+    for ev in events:
+        try:
+            st = reduce(st, ev.model_copy(update={"seq": st.last_seq + 1}))
+        except IllegalTransition as exc:
+            return str(exc)
+    return None

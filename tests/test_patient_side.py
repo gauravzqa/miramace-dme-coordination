@@ -367,3 +367,39 @@ def test_local_escalation_fallback_matches_catalogue_ids():
         except ImportError:
             continue
         assert [o.option_id for o in esc.options] == option_ids(trig)
+
+
+# ------------------------------------------------------------------ F2 safety fixes (companion / grounding)
+
+
+def test_f2_safety_net_keywords_expanded():
+    from miramace.companion.agent import safety_net_kind
+
+    for t in ("I can’t breathe", "I'm short of breath", "there's blood, I'm bleeding", "call 911",
+              "I passed out", "I'm so confused", "I'm scared", "can I talk to someone", "I want the nurse"):
+        assert safety_net_kind(t) is not None, t
+    assert safety_net_kind("The address is 2100 N Lincoln Park W") is None
+
+
+async def test_f2_distress_and_cost_keep_both_intents():
+    from miramace.llm.port import ScriptedLLM
+
+    snap = build_snapshot(base_state(), SIM_START)
+    llm = ScriptedLLM({("companion", "*"): CompanionOut(
+        reply="I hear you about the cost.",
+        intents=[IntentLLM(kind="cost_concern", address=None, preferred_time=None, note=None)],
+    )})
+    r = await LLMCompanion(llm).respond(snap, [], "I fell and I can't afford this")
+    kinds = [i.kind for i in r.intents]
+    assert "cost_concern" in kinds and "needs_human" in kinds and "nurse" in r.reply.lower()
+
+
+def test_f2_grounding_amounts_iso_dates_durations_and_domain_words():
+    snap = build_snapshot(base_state(), SIM_START)
+    assert grounding_check("You'll pay about 150 dollars a month.", snap)
+    assert grounding_check("It should arrive by 2026-11-09.", snap)
+    assert not grounding_check("It should arrive by 2026-11-05.", snap)  # Nov 5 is in this snapshot
+    assert grounding_check("It will be there within 2 days.", snap)
+    assert grounding_check("We'll know in three weeks.", snap)
+    assert not grounding_check("Your Care Advocate is checking the K0001 order under Part B.", snap)
+    assert not grounding_check("You pay 20% for up to 13 months after the $283 deductible.", snap)
