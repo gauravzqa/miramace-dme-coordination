@@ -1,8 +1,11 @@
 """B3 AI calls — two-pass claim extractor with quote verification.
 
 Code-level checks applied to every extraction (LLM or fake):
-- evidence quote must be a normalized substring of ONE counterparty utterance (caller text never counts),
-  else status unknown + flag `quote_unverified:{field}`;
+- evidence quote (>= 8 chars or >= 2 words) must be a word-boundary normalized substring of ONE counterparty
+  utterance that answers a caller question (not a greeting / identity confirmation; caller text never
+  counts), else status unknown + flag `quote_unverified:{field}`;
+- the value must be consistent with its quote (yes/no vs rules.parse_bool(quote); integers present), else
+  unknown + `value_inconsistent:{field}`;
 - quotes that overlap an injection-looking utterance are rejected (`injection_quote:{field}`);
 - pass A vs pass B (reversed field order, skeptical auditor) disagreement on normalized value → unknown +
   `two_pass_disagreement:{field}`;
@@ -80,24 +83,105 @@ def counterparty_lines(utterances: Iterable[Utterance]) -> list[str]:
     return [u.text for u in utterances if u.speaker == "counterparty"]
 
 
+MIN_QUOTE_CHARS = 8
+_IDENTITY_Q = re.compile(
+    r"\b(have i reached|did i reach|i ve reached|is this (?:\w+ ){0,5}?"
+    r"(office|medical|medicine|clinic|practice|equipment|supply|supplies|pharmacy|health|healthcare|dme|home|"
+    r"family|center|group))\b"
+)
+
+
+def _quote_long_enough(q: str) -> bool:
+    return len(q) >= MIN_QUOTE_CHARS or len(q.split()) >= 2
+
+
+def _contains_words(haystack: str, needle: str) -> bool:
+    """Word-boundary substring on normalized text ('no' is not inside 'know')."""
+    return bool(needle) and f" {needle} " in f" {haystack} "
+
+
+def answer_lines(utterances: list[Utterance]) -> list[str]:
+    """Counterparty lines that answer a caller question: the reply block right after a caller line that is
+    neither the disclosure nor an identity check ('have I reached X?'). Greetings, the reply to the
+    disclosure/identity check, and a new person's greeting after a transfer are not evidence."""
+    from miramace.agents.prompts import DISCLOSURE
+
+    out: list[str] = []
+    admissible = False
+    for u in utterances:
+        if u.speaker == "caller":
+            n = normalize(u.text)
+            admissible = n != normalize(DISCLOSURE) and not _IDENTITY_Q.search(n)
+        elif u.speaker == "counterparty":
+            if u.event == "transfer":
+                admissible = False
+                continue
+            if admissible:
+                out.append(u.text)
+    return out
+
+
 def quote_ok(quote: str | None, utterances: list[Utterance]) -> bool:
-    """True iff the normalized quote is a substring of a single, non-injection counterparty utterance."""
+    """True iff the normalized quote (>= 8 chars or >= 2 words) is a word-boundary substring of a single,
+    non-injection counterparty utterance that answers a caller question (see `answer_lines`)."""
     q = normalize(quote)
-    if not q:
+    if not q or not _quote_long_enough(q):
         return False
-    for line in counterparty_lines(utterances):
-        if q in normalize(line) and not looks_like_injection(line):
+    for line in answer_lines(utterances):
+        if _contains_words(normalize(line), q) and not looks_like_injection(line):
             return True
     return False
+
+
+_BOOL_VALUES = {"yes": True, "no": False, "true": True, "false": False, "y": True, "n": False}
+_NUM_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "fourteen": 14,
+    "a day": 1,
+    "a week": 7,
+}
+
+
+def value_consistent(value: str | None, quote: str | None) -> bool:
+    """The stated value must not contradict its own evidence: yes/no values must agree with
+    rules.parse_bool(quote) when the quote reads as yes/no (hedged quotes → inconsistent); integer values
+    must appear in the quote (digits or number word)."""
+    from miramace.rules import parse_bool
+
+    v = normalize(value)
+    q = normalize(quote)
+    if v in _BOOL_VALUES:
+        qb = parse_bool(quote)
+        if qb is not None:
+            return qb is _BOOL_VALUES[v]
+        if _UNSURE.search(q):  # hedged ("not sure", "let me check") never supports a yes/no
+            return False
+        # no explicit yes/no: "yes" needs an un-negated quote, "no" needs a negation ("we're out of them")
+        return not _NEG.search(q) if _BOOL_VALUES[v] else bool(_NEG.search(q))
+    if v.isdigit():
+        nums = set(re.findall(r"\d+", q)) | {str(n) for w, n in _NUM_WORDS.items() if _contains_words(q, w)}
+        return str(int(v)) in {str(int(x)) for x in nums}
+    return True
 
 
 def _quote_hits_injection(quote: str | None, utterances: list[Utterance]) -> bool:
     q = normalize(quote)
     if not q:
         return False
-    return any(q in normalize(t) and looks_like_injection(t) for t in counterparty_lines(utterances)) or (
-        looks_like_injection(quote or "")
-    )
+    return any(
+        _contains_words(normalize(t), q) and looks_like_injection(t) for t in counterparty_lines(utterances)
+    ) or looks_like_injection(quote or "")
 
 
 def fields_for(task: CallTask) -> list[str]:
@@ -157,6 +241,10 @@ def verify_claims(
                 flags.append(f"{kind}:{field}")
             return _unknown(field)
         if c.value is None or not normalize(c.value):
+            return _unknown(field)
+        if not value_consistent(c.value, c.evidence_quote):
+            if record:
+                flags.append(f"value_inconsistent:{field}")
             return _unknown(field)
         return Claim(field=field, status="stated", value=c.value, evidence_quote=c.evidence_quote)
 
@@ -236,7 +324,10 @@ class Extractor:
 # ------------------------------------------------------------------------------------------- fake
 
 _NEG = re.compile(r"\b(no|not|don t|dont|never|can t|cannot|won t|isn t|aren t|out of)\b")
-_UNSURE = re.compile(r"\b(not sure|have to check|don t know|no idea|i d have to)\b")
+_UNSURE = re.compile(
+    r"\b(not sure|unsure|have to check|need to check|let me check|double check|don t know|do not know|"
+    r"no idea|i d have to|maybe|not certain)\b"
+)
 
 
 def _heuristic_value(slot_type: str, text: str) -> str | None:

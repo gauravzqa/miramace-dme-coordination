@@ -143,7 +143,8 @@ def test_caller_prompt_phi_gate():
             assert needle not in s
     for phase in ("verified", "readback", "closing"):
         s = caller_system(task, phase, task.slots)
-        assert phi.name in s and phi.mbi in s and "1954" in s
+        # name + DOB unlock after verification; the Medicare number is never given to the caller
+        assert phi.name in s and "1954" in s and phi.mbi not in s
     # no PHI in task -> no block even when verified
     assert eleanor().name not in caller_system(pcp_task(phi=False), "verified", [])
 
@@ -194,7 +195,7 @@ async def test_llm_brains_with_scripted_llm_and_phi_prompts():
         if phase in ("opening", "verify_party"):
             assert not contains_phi(r["system"], phi)
         else:
-            assert phi.mbi in r["system"]
+            assert phi.name in r["system"] and phi.mbi not in r["system"]
     assert all(c.ok for c in llm.ledger)
     keys = [c.key for c in llm.ledger]
     assert len(keys) == len(set((c.agent, c.key) for c in llm.ledger))
@@ -280,3 +281,63 @@ async def test_max_turns_stops():
     raw = await run_text_call(task, Chatty(), FakePersonaBrain(maria()))
     assert raw.end_reason == "max_turns" and "max_turns" in raw.flags
     assert len(_callers(raw)) == 3
+
+
+# ------------------------------------------------------------------ F2 safety fixes
+
+
+def test_phi_locked_after_injection_even_when_verified():
+    from miramace.calls.runner import phi_lock_reason
+
+    task = pcp_task()
+    t = Transcript()
+    t.add("counterparty", "Maria", f"{ORG}, this is Maria.")
+    t.add("caller", "ai", DISCLOSURE)
+    t.add("counterparty", "Maria", INJECTION_TEXT)
+    assert phi_lock_reason(t.utterances, task.org_name) == "injection"
+    say = CallerTurn(
+        say=f"It's for {task.phi.name}.", slots_touched=[], action="continue", hangup_reason=None
+    )
+    out, flags = guard_caller_turn(task, "verified", say, t.utterances)
+    assert "phi_blocked" in flags and "phi_locked:injection" in flags and not contains_phi(out.say, task.phi)
+    sys = caller_system(task, "verified", task.slots, phi_locked=True)
+    assert not contains_phi(sys, task.phi) and "LOCKED" in sys
+
+
+def test_mbi_never_spoken_in_any_phase_and_any_spacing():
+    task = pcp_task()
+    for form in (task.phi.mbi, task.phi.mbi.replace("-", ""), "1EG4 TE5 MK72", "1 E G 4 T E 5 M K 7 2"):
+        turn = CallerTurn(
+            say=f"Her number is {form}.", slots_touched=[], action="continue", hangup_reason=None
+        )
+        out, flags = guard_caller_turn(task, "verified", turn)
+        assert "mbi_blocked" in flags and "1EG4" not in out.say.replace(" ", "")
+
+
+def test_unprompted_dob_request_before_verification_locks_phi():
+    from miramace.calls.runner import phi_lock_reason
+
+    task = pcp_task()
+    t = Transcript()
+    t.add("counterparty", "x", "Hello? What's the patient's date of birth?")
+    t.add("caller", "ai", DISCLOSURE)
+    t.add("counterparty", "x", f"Yes, this is {ORG}.")
+    assert phi_lock_reason(t.utterances, task.org_name) == "unprompted_identifier_request"
+    # a DOB question AFTER verification is a normal record lookup
+    t2 = Transcript()
+    t2.add("counterparty", "Maria", f"{ORG}, this is Maria.")
+    t2.add("counterparty", "Maria", "Sure, what's her date of birth?")
+    assert phi_lock_reason(t2.utterances, task.org_name) is None
+
+
+def test_is_verified_rejects_denials():
+    from miramace.calls.runner import is_verified
+    from miramace.models import Utterance
+
+    def u(text):
+        return Utterance(turn=0, speaker="counterparty", name="x", text=text, ts=0)
+
+    assert is_verified([u(f"{ORG}, this is Maria.")], ORG)
+    assert not is_verified([u(f"You have the wrong number, this isn't {ORG}.")], ORG)
+    assert not is_verified([u(f"Nope, we're not {ORG}.")], ORG)
+    assert not is_verified([u(f"{ORG}, this is Maria."), u("Sorry, wrong number actually.")], ORG)

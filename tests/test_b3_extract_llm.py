@@ -301,3 +301,76 @@ def test_persona_prompt_cards_and_companion():
     c = prompts.companion_system("Order: waiting on Dr. Chen.", None)
     assert "CASE SNAPSHOT" in c and "waiting on Dr. Chen" in c
     assert "L33788" in prompts.lcd_system()
+
+
+# ------------------------------------------------------------------ F2 safety fixes
+
+
+def test_quote_rules_length_boundary_and_answer_turn():
+    from miramace.extract.extractor import quote_ok, value_consistent
+    from miramace.models import Claim
+
+    utts = [
+        _u(0, "counterparty", "Lakeshore Home Medical Equipment, this is Tom."),
+        _u(1, "caller", prompts.DISCLOSURE),
+        _u(2, "counterparty", "Okay, yes, how can I help?"),
+        _u(3, "caller", "Do you have a K0001 standard manual wheelchair in stock?"),
+        _u(4, "counterparty", "Yes, we have standard K0001 chairs in stock."),
+        _u(5, "caller", "Are you taking new Medicare Part B patients?"),
+        _u(6, "counterparty", "I don't know, I'd have to check."),
+    ]
+    assert quote_ok("we have standard K0001 chairs in stock", utts)
+    assert quote_ok("in stock", utts)  # short but 2 words
+    assert not quote_ok("yes", utts)  # too short
+    assert not quote_ok("this is Tom", utts)  # greeting is not evidence
+    assert not quote_ok("Okay, yes, how can I help", utts)  # reply to the disclosure is not evidence
+    assert not quote_ok("ve standard", utts)  # not on word boundaries
+    assert value_consistent("yes", "Yes, we have standard K0001 chairs in stock.")
+    assert not value_consistent("no", "Yes, we have standard K0001 chairs in stock.")
+    assert not value_consistent("no", "I don't know, I'd have to check.")
+    assert value_consistent("3", "We could deliver in 3 business days.")
+    assert not value_consistent("2", "We could deliver in 3 business days.")
+    a = [Claim(field="taking_new_medicare", status="stated", value="no",
+               evidence_quote="I don't know, I'd have to check.")]
+    from miramace.extract.extractor import verify_claims
+
+    claims, flags = verify_claims(["taking_new_medicare"], utts, a, a)
+    assert claims[0].status == "unknown" and "value_inconsistent:taking_new_medicare" in flags
+
+
+async def test_lcd_reader_merges_original_and_addendum():
+    addendum = VisitNote(
+        doc_id="add1",
+        text="Addendum: she can self-propel the wheelchair safely within the home.",
+        received_at=datetime(2026, 11, 4, 10, tzinfo=CHICAGO),
+    )
+    orig = LCDCheck(results=[
+        CriterionResult(criterion_id="home_accommodates", met="met", quote="Home has wide doorways."),
+        CriterionResult(criterion_id="self_propel_or_caregiver", met="not_documented", quote=None),
+    ])
+    add = LCDCheck(results=[
+        CriterionResult(criterion_id="self_propel_or_caregiver", met="met",
+                        quote="she can self-propel the wheelchair safely"),
+        CriterionResult(criterion_id="home_accommodates", met="not_documented", quote=None),
+    ])
+    llm = ScriptedLLM({("lcd", "note1:lcd"): orig, ("lcd", "add1:lcd"): add})
+    reader = LCDReader(llm)
+    for out in (await reader.check([NOTE, addendum]), await reader.check(NOTE, addendum)):
+        assert out.results[LCDCriterion.HOME_ACCOMMODATES] == "met"
+        assert out.results[LCDCriterion.SELF_PROPEL_OR_CAREGIVER] == "met"
+        assert "self-propel" in out.evidence[LCDCriterion.SELF_PROPEL_OR_CAREGIVER]
+    single = await reader.check(NOTE)  # old single-note call still works
+    assert single.results[LCDCriterion.SELF_PROPEL_OR_CAREGIVER] == "not_documented"
+
+
+def test_lcd_quote_must_be_15_chars_on_word_boundaries():
+    from miramace.extract.lcd import checklist_from
+
+    note = "Patient has a cane. Home has wide doorways."
+    chk = LCDCheck(results=[
+        CriterionResult(criterion_id="home_accommodates", met="met", quote="wide doorways"),  # 13 chars
+        CriterionResult(criterion_id="cane_walker_insufficient", met="met", quote="nt has a cane. Home"),
+    ])
+    cl = checklist_from(chk, note)
+    assert cl.results[LCDCriterion.HOME_ACCOMMODATES] == "not_documented"
+    assert cl.results[LCDCriterion.CANE_WALKER_INSUFFICIENT] == "not_documented"

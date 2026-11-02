@@ -11,7 +11,7 @@ import re
 
 from miramace.agents.prompts import DISCLOSURE, INJECTION_TEXT, caller_system, persona_system
 from miramace.agents.schemas import CallerTurn, PersonaTurn
-from miramace.calls.runner import guard_caller_turn, touched_slots
+from miramace.calls.runner import guard_caller_turn, phi_locked, touched_slots
 from miramace.extract.extractor import is_readback, looks_like_injection, normalize
 from miramace.models import CallTask, Fact, PersonaSpec, SlotSpec, Utterance
 from miramace.ports import LLMPort, TranscriptView
@@ -60,11 +60,13 @@ class LLMCallerBrain:
         out = await self.llm.structured(
             agent="caller",
             key=f"{task.task_id}:t{turn}",
-            system=caller_system(task, view.phase, open_slots),
+            system=caller_system(
+                task, view.phase, open_slots, phi_locked=phi_locked(view.utterances, task.org_name)
+            ),
             messages=to_messages(view.utterances, "caller"),
             schema=CallerTurn,
         )
-        out, _ = guard_caller_turn(task, view.phase, out)
+        out, _ = guard_caller_turn(task, view.phase, out, view.utterances)
         sbt[turn] = list(out.slots_touched)
         return out
 

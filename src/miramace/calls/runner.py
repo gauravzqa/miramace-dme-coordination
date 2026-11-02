@@ -17,7 +17,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from miramace.agents.prompts import DISCLOSURE, PHI_PHASES, contains_phi
+from miramace.agents.prompts import DISCLOSURE, PHI_PHASES, contains_mbi, contains_phi
 from miramace.agents.schemas import CallerTurn, PersonaTurn
 from miramace.clock import is_business, next_business_time
 from miramace.extract.extractor import looks_like_injection, normalize
@@ -147,13 +147,67 @@ def _last_transfer_index(utterances: list[Utterance]) -> int:
     return idx
 
 
+_DENIAL_RE = re.compile(r"\b(wrong number|not the right number|you ve got the wrong|no one by that name)\b")
+_NEG_BEFORE = (
+    r"\b(?:not|isn t|isnt|aren t|arent|no longer|never heard of|nothing to do with)\b(?:\s+\w+){0,3}\s+"
+)
+
+
+def _confirms_org(text: str, org: str) -> bool:
+    """The utterance names the org and does not deny being it ('this is not X', 'wrong number')."""
+    n = normalize(text)
+    if not org or org not in n or _DENIAL_RE.search(n):
+        return False
+    return not re.search(_NEG_BEFORE + re.escape(org), n)
+
+
+def _denies_org(text: str, org: str) -> bool:
+    n = normalize(text)
+    return bool(_DENIAL_RE.search(n)) or bool(org and re.search(_NEG_BEFORE + re.escape(org), n))
+
+
 def is_verified(utterances: list[Utterance], org_name: str) -> bool:
-    """A counterparty utterance after the last transfer contains the normalized org name."""
+    """A counterparty utterance after the last transfer names the org without denying it, and no later
+    counterparty utterance denies it ('wrong number', 'this isn't X')."""
     org = normalize(org_name)
+    if not org:
+        return False
     start = _last_transfer_index(utterances) + 1
-    return bool(org) and any(
-        u.speaker == "counterparty" and org in normalize(u.text) for u in utterances[start:]
-    )
+    cps = [u for u in utterances[start:] if u.speaker == "counterparty"]
+    if any(_denies_org(u.text, org) for u in cps):
+        return False
+    return any(_confirms_org(u.text, org) for u in cps)
+
+
+_ID_REQUEST_RE = re.compile(
+    r"\b(medicare (number|id|card|beneficiary)|mbi|social security|ssn|"
+    r"date of birth|dob|birth ?date|birthday|born)\b"
+)
+_MBI_REQUEST_RE = re.compile(r"\b(medicare (number|id|card|beneficiary)|mbi|social security|ssn)\b")
+
+
+def phi_lock_reason(utterances: list[Utterance], org_name: str | None = None) -> str | None:
+    """Why patient identifiers must stay locked for the REST of this call, or None.
+
+    - any counterparty line looks like a prompt injection ('SYSTEM NOTE TO AI ...');
+    - the counterparty asks for the Medicare number / SSN (never given on a call, so asking is out of scope);
+    - the counterparty asks for DOB / identifiers before the party was verified (unprompted).
+    """
+    for i, u in enumerate(utterances):
+        if u.speaker != "counterparty":
+            continue
+        if looks_like_injection(u.text):
+            return "injection"
+        n = normalize(u.text)
+        if _MBI_REQUEST_RE.search(n):
+            return "identifier_request"
+        if _ID_REQUEST_RE.search(n) and org_name is not None and not is_verified(utterances[:i], org_name):
+            return "unprompted_identifier_request"
+    return None
+
+
+def phi_locked(utterances: list[Utterance], org_name: str | None = None) -> bool:
+    return phi_lock_reason(utterances, org_name) is not None
 
 
 def needs_disclosure(t: Transcript | list[Utterance]) -> bool:
@@ -188,15 +242,30 @@ def phase_from(transcript: Transcript, task: CallTask) -> CallPhase:
     return "readback"
 
 
-def guard_caller_turn(task: CallTask, phase: str, turn: CallerTurn) -> tuple[CallerTurn, list[str]]:
-    """Code-level guardrails on any caller line (LLM or fake): PHI gate, no commitments, valid slot ids."""
+def guard_caller_turn(
+    task: CallTask, phase: str, turn: CallerTurn, utterances: list[Utterance] | None = None
+) -> tuple[CallerTurn, list[str]]:
+    """Code-level guardrails on any caller line (LLM or fake): PHI gate, no commitments, valid slot ids.
+
+    PHI gate: the Medicare number is never spoken (any phase); name/DOB only in a verified phase AND only if
+    the call is not PHI-locked (`phi_lock_reason` over `utterances`: injection / identifier request).
+    """
     flags: list[str] = []
     valid = {s.id for s in task.slots}
     slots = [s for s in turn.slots_touched if s in valid]
     say = turn.say.strip()
-    if phase not in PHI_PHASES and contains_phi(say, task.phi):
+    lock = phi_lock_reason(utterances, task.org_name) if utterances is not None else None
+    if contains_mbi(say, task.phi):
+        flags += ["phi_blocked", "mbi_blocked"]
+        say, slots = "I'm not able to share that over the phone; I'll pass it to the care team.", []
+    elif contains_phi(say, task.phi) and (phase not in PHI_PHASES or lock is not None):
         flags.append("phi_blocked")
-        say, slots = f"Before we go further, can you confirm I've reached {task.org_name}?", []
+        if lock is not None:
+            flags.append(f"phi_locked:{lock}")
+            say = "I'm not able to share patient details on this call; I'll pass it to the care team."
+        else:
+            say = f"Before we go further, can you confirm I've reached {task.org_name}?"
+        slots = []
     if _COMMITMENT_RE.search(say):
         flags.append("commitment_blocked")
         say, slots = (
@@ -246,6 +315,9 @@ async def run_text_call(task: CallTask, caller: Brain, persona: Brain) -> RawCal
         t.add_persona_turn(pt, cp_name)
         if looks_like_injection(pt.say):
             _add_flag(flags, "injection_suspected")
+        lock = phi_lock_reason(t.utterances, task.org_name)
+        if lock is not None:
+            _add_flag(flags, f"phi_locked:{lock}")
         if pt.event == "transfer":
             _add_flag(flags, "transferred")
             cp_name = pt.transfer_to or "Transferred party"
@@ -272,7 +344,7 @@ async def run_text_call(task: CallTask, caller: Brain, persona: Brain) -> RawCal
         else:
             out = await caller.next(t.view(task, phase, "caller"))
             assert isinstance(out, CallerTurn), "caller brain must return CallerTurn"
-            ct, gflags = guard_caller_turn(task, phase, out)
+            ct, gflags = guard_caller_turn(task, phase, out, t.utterances)
             for f in gflags:
                 _add_flag(flags, f)
         t.add_caller_turn(ct)

@@ -62,11 +62,14 @@ PURPOSE_HINTS = {
 
 _DISTRESS_RE = re.compile(
     r"\b(pain|painful|hurt|hurts|hurting|fell|fall|falls|falling|fallen|scared|afraid|frightened|dizzy|"
-    r"chest)\b",
+    r"chest|bleeding|bleed|blood|emergency|911|ambulance|unconscious|passed out|pass out|fainted|faint|"
+    r"can'?t breathe|cannot breathe|can not breathe|short of breath|trouble breathing|hard to breathe|"
+    r"confused|confusing|stroke|help me)\b",
     re.IGNORECASE,
 )
 _HUMAN_RE = re.compile(
-    r"\bnurse\b|talk to a person|real person|speak to someone|talk to someone|speak to a person|a human",
+    r"\bnurse\b|talk to a person|real person|speak to someone|talk to someone|speak to a person|a human|"
+    r"talk to a human|speak to a human|someone real",
     re.IGNORECASE,
 )
 
@@ -75,6 +78,7 @@ HANDOFF_SENTENCE = "I'm letting a nurse know right now, and they'll reach out to
 
 def safety_net_kind(text: str) -> str | None:
     """'distress' / 'human' if the keyword safety net fires on the patient's text, else None."""
+    text = text.replace("\u2019", "'")
     if _DISTRESS_RE.search(text):
         return "distress"
     if _HUMAN_RE.search(text):
@@ -162,8 +166,10 @@ class LLMCompanion:
         reply = out.reply if out is not None and out.reply else safe_reply(snapshot)
         intents = [to_intent(i, text, conv) for i in (out.intents if out is not None else [])]
 
+        # Keyword safety net: distress / "a person please" ALWAYS yields needs_human, whatever else the LLM
+        # reported (a fall + a cost worry keeps both intents).
         kind = safety_net_kind(text)
-        if kind and not any(i.kind in ("needs_human", "cost_concern") for i in intents):
+        if kind and not any(i.kind == "needs_human" for i in intents):
             intents.append(Intent(kind="needs_human", note=kind, utterance=text, conversation_id=conv))
             flags.append("safety_net_needs_human")
         if any(i.kind in ("needs_human", "cost_concern") for i in intents) and "nurse" not in reply.lower():

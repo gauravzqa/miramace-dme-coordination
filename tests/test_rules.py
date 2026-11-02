@@ -186,3 +186,10 @@ def test_can_schedule():
     assert not ok
     ok, reasons = can_schedule(ready_state(assignment_by_sid={}), SIM_START)
     assert not ok
+
+
+@pytest.mark.parametrize(
+    "text", ["not sure", "I don't know", "maybe", "let me check", "Maybe, I'd have to check.", "No idea"]
+)
+def test_parse_bool_hedges_are_unknown(text):
+    assert parse_bool(text) is None

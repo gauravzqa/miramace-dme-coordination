@@ -264,14 +264,20 @@ _POS = re.compile(
     r"\b(yes|yep|yeah|yup|ya|sure|correct|absolutely|definitely|certainly|of course|affirmative|true|"
     r"we do|we are|we can|we have|we will|that's right|thats right|indeed|y)\b"
 )
+_UNSURE = re.compile(
+    r"\b(not sure|unsure|don't know|dont know|do not know|no idea|maybe|perhaps|possibly|might|"
+    r"let me check|have to check|need to check|i'd have to|i would have to|double-check|double check|"
+    r"not certain|can't say|cant say|hard to say|depends)\b"
+)
 
 
 def parse_bool(text: str | None) -> bool | None:
-    """Yes/no answer → bool; None when it can't be read. Negation wins ("yes, but not at the moment")."""
+    """Yes/no answer → bool; None when it can't be read or is hedged ("not sure", "maybe", "let me check").
+    Negation wins over affirmation ("yes, but not at the moment")."""
     if text is None:
         return None
     t = text.strip().lower().replace("’", "'")
-    if not t:
+    if not t or _UNSURE.search(t):
         return None
     t_wo_ok = _NEG_OK.sub(" ", t)
     if _NEG.search(t_wo_ok):
