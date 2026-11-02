@@ -207,6 +207,10 @@ class SimCallerPort:
                 )
             )
             spec = spec.model_copy(update={"facts": facts})
+        elif spec.behaviour == "never_got_it":
+            # Live-run fix: the LLM persona's "never got it" card must follow the simulated truth (only a
+            # lost request version is "never received"); otherwise the office behaves helpfully.
+            spec = spec.model_copy(update={"behaviour": "helpful"})
         return spec
 
     # ---- port

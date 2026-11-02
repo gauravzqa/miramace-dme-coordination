@@ -374,3 +374,33 @@ def test_lcd_quote_must_be_15_chars_on_word_boundaries():
     cl = checklist_from(chk, note)
     assert cl.results[LCDCriterion.HOME_ACCOMMODATES] == "not_documented"
     assert cl.results[LCDCriterion.CANE_WALKER_INSUFFICIENT] == "not_documented"
+
+
+async def test_lcd_majority_vote_overrules_a_flaky_pass():
+    """Live-run regression: one pass marked a clearly documented criterion not_documented."""
+    from miramace.agents.schemas import CriterionResult, LCDCheck
+    from miramace.extract.lcd import LCDReader
+    from miramace.llm.port import ScriptedLLM
+    from miramace.models import CHICAGO, LCDCriterion, VisitNote
+    from datetime import datetime
+
+    text = ("Her mobility limitation prevents her from getting to the bathroom and kitchen safely. "
+            "A walker is insufficient because of shoulder pain and two near-falls. "
+            "Her apartment has 34-inch doorways; the home accommodates a manual wheelchair. "
+            "A manual wheelchair will significantly improve her ability to toilet and she will use it daily. "
+            "She is able to self-propel with her upper body.")
+    q = {"mobility_limits_mradl": "Her mobility limitation prevents her from getting to the bathroom and kitchen safely",
+         "cane_walker_insufficient": "A walker is insufficient because of shoulder pain and two near-falls",
+         "home_accommodates": "the home accommodates a manual wheelchair",
+         "will_use_improves": "A manual wheelchair will significantly improve her ability to toilet",
+         "self_propel_or_caregiver": "She is able to self-propel with her upper body"}
+
+    def check(flaky: bool) -> LCDCheck:
+        return LCDCheck(results=[CriterionResult(criterion_id=k, met="not_documented" if (flaky and k == "mobility_limits_mradl") else "met",
+                                                 quote=None if (flaky and k == "mobility_limits_mradl") else v) for k, v in q.items()])
+
+    llm = ScriptedLLM({("lcd", "n1:lcd"): check(True), ("lcd", "n1:lcd2"): check(False), ("lcd", "n1:lcd3"): check(False)})
+    note = VisitNote(doc_id="n1", text=text, received_at=datetime(2026, 11, 4, 10, tzinfo=CHICAGO))
+    out = await LCDReader(llm).check(note)
+    assert out.results[LCDCriterion.MRADL_LIMITATION] == "met"
+    assert all(v == "met" for v in out.results.values())
