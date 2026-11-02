@@ -184,6 +184,49 @@ def _quote_hits_injection(quote: str | None, utterances: list[Utterance]) -> boo
     ) or looks_like_injection(quote or "")
 
 
+_BOOLEAN_FIELDS = {
+    "taking_new_medicare", "k0001_in_stock", "delivers_to_zip", "accepts_assignment_all_months",
+    "request_received", "reserve_unit", "order_received", "will_fax_order", "delivered",
+}
+
+
+def _semantic_agreement(field: str, a: Claim, b: Claim, slot_types: dict[str, str]) -> Claim | None:
+    """Two passes worded the same answer differently. Live run: delivery_slot 'tomorrow at 10 AM' vs
+    'Saturday, Nov 7 at 10 AM' (same counterparty sentence) was treated as disagreement 3x and caused a false
+    supplier release. Agree when:
+      - yes/no field: both read as the same boolean (value, else its verified quote);
+      - free-text field: both cite the same counterparty words -> keep the counterparty's own words as the
+        value (code resolves dates/times against the virtual clock later)."""
+    from miramace.rules import parse_bool
+
+    qa, qb = normalize(a.evidence_quote), normalize(b.evidence_quote)
+    if not qa or not qb:
+        return None
+    same_evidence = qa == qb or qa in qb or qb in qa
+    kind = slot_types.get(field, "bool" if field in _BOOLEAN_FIELDS else "str")
+    if kind == "bool":
+        def as_bool(c: Claim) -> bool | None:
+            v = parse_bool(c.value)
+            return v if v is not None else parse_bool(c.evidence_quote)
+
+        va, vb = as_bool(a), as_bool(b)
+        if va is not None and va == vb:
+            yn = "yes" if va else "no"
+            return Claim(field=field, status="stated", value=yn, evidence_quote=a.evidence_quote)
+        return None
+    if kind == "str" and same_evidence:
+        # at least one pass's value must be backed word-for-word by the shared quote
+        def backed_by_quote(c: Claim) -> bool:
+            return set(normalize(c.value).split()) <= set(normalize(c.evidence_quote).split())
+
+        backed = [c for c in (a, b) if backed_by_quote(c)]
+        if not backed:
+            return None
+        longer = a.evidence_quote if len(qa) >= len(qb) else b.evidence_quote
+        return Claim(field=field, status="stated", value=longer, evidence_quote=longer)
+    return None
+
+
 def fields_for(task: CallTask) -> list[str]:
     base = list(SUPPLIER_FIELDS if task.party == "supplier" else PCP_FIELDS)
     for s in task.slots:
@@ -222,8 +265,10 @@ def verify_claims(
     utterances: list[Utterance],
     pass_a: Iterable[ClaimLLM | Claim],
     pass_b: Iterable[ClaimLLM | Claim] | None = None,
+    slot_types: dict[str, str] | None = None,
 ) -> tuple[list[Claim], list[str]]:
     """Apply quote check, injection guard, two-pass agreement and readback rule. Code decides, not the LLM."""
+    slot_types = slot_types or {}
     flags: list[str] = []
     a_map = _first_by_field(pass_a)
     b_map = _first_by_field(pass_b) if pass_b is not None else None
@@ -257,11 +302,14 @@ def verify_claims(
         already = any(fl.endswith(f":{f}") for fl in flags)
         b = checked(b_map.get(f), f, record=not already)
         if a.status == "stated" and b.status == "stated":
-            if normalize(a.value) != normalize(b.value):
+            if normalize(a.value) == normalize(b.value):
+                claims.append(a)
+            elif (agreed := _semantic_agreement(f, a, b, slot_types)) is not None:
+                flags.append(f"two_pass_reconciled:{f}")
+                claims.append(agreed)
+            else:
                 flags.append(f"two_pass_disagreement:{f}")
                 claims.append(_unknown(f))
-            else:
-                claims.append(a)
         elif a.status != b.status:
             if not any(fl.endswith(f":{f}") for fl in flags):
                 flags.append(f"two_pass_disagreement:{f}")
@@ -318,7 +366,8 @@ class Extractor:
             messages=msg,
             schema=Extraction,
         )
-        return verify_claims(fields, utterances, a.claims, b.claims)
+        types = {sl.id: sl.type for sl in task.slots}
+        return verify_claims(fields, utterances, a.claims, b.claims, slot_types=types)
 
 
 # ------------------------------------------------------------------------------------------- fake

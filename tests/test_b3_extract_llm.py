@@ -107,11 +107,16 @@ async def test_injection_sentence_never_evidence_for_order_status():
 
 async def test_two_pass_disagreement():
     a = _ex(("promised_by", "stated", "Thursday", "By Thursday."))
-    b = _ex(("promised_by", "stated", "Friday", "By Thursday."))
+    b = _ex(("promised_by", "stated", "Friday", "By Friday."))  # different (unverifiable) evidence
     task, _, ex = _extractor(a, b)
     claims, flags = await ex.extract_verified(task, TRANSCRIPT)
     assert next(c for c in claims if c.field == "promised_by").status == "unknown"
-    assert "two_pass_disagreement:promised_by" in flags
+    assert any(f.endswith(":promised_by") for f in flags)
+    # same evidence, one pass contradicts its own quote: the counterparty's words win (live-run fix)
+    task, _, ex = _extractor(a, _ex(("promised_by", "stated", "Friday", "By Thursday.")))
+    claims, flags = await ex.extract_verified(task, TRANSCRIPT)
+    c = next(c for c in claims if c.field == "promised_by")
+    assert c.status == "stated" and "thursday" in c.value.lower()
     # stated vs unknown also disagrees
     task, _, ex = _extractor(a, _ex(("promised_by", "unknown", None, None)))
     claims, flags = await ex.extract_verified(task, TRANSCRIPT)
@@ -404,3 +409,26 @@ async def test_lcd_majority_vote_overrules_a_flaky_pass():
     out = await LCDReader(llm).check(note)
     assert out.results[LCDCriterion.MRADL_LIMITATION] == "met"
     assert all(v == "met" for v in out.results.values())
+
+
+def test_two_pass_same_evidence_different_wording_reconciles():
+    """Live regression: delivery_slot 'tomorrow at 10 AM' vs 'Saturday, November 7 at 10 AM' citing the same
+    sentence must not be a disagreement (it caused a false supplier release)."""
+    from miramace.extract.extractor import verify_claims
+    from miramace.models import Claim, Utterance
+
+    utts = [
+        Utterance(turn=0, speaker="counterparty", name="Tom", text="Lakeshore Home Medical Equipment, this is Tom.", ts=0),
+        Utterance(turn=1, speaker="caller", name="AI", text="What is the earliest day and time you can deliver to her home?", ts=1),
+        Utterance(turn=2, speaker="counterparty", name="Tom", text="We can bring it out tomorrow at 10 AM.", ts=2),
+    ]
+    q = "We can bring it out tomorrow at 10 AM."
+    a = [Claim(field="delivery_slot", status="stated", value="tomorrow at 10 AM", evidence_quote=q)]
+    b = [Claim(field="delivery_slot", status="stated", value="Saturday, November 7 at 10 AM", evidence_quote=q)]
+    claims, flags = verify_claims(["delivery_slot"], utts, a, b, slot_types={"delivery_slot": "str"})
+    assert claims[0].status == "stated" and "tomorrow at 10" in claims[0].value.lower()
+    assert "two_pass_reconciled:delivery_slot" in flags
+    # genuinely different answers still disagree
+    b2 = [Claim(field="delivery_slot", status="stated", value="Monday", evidence_quote="Lakeshore Home Medical Equipment, this is Tom.")]
+    claims2, flags2 = verify_claims(["delivery_slot"], utts, a, b2, slot_types={"delivery_slot": "str"})
+    assert claims2[0].status == "unknown"
