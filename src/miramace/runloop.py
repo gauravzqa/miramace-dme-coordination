@@ -161,7 +161,9 @@ async def run_case(
             break
         use_doc = t_in is not None and (task is None or t_in <= task.due_at)
         nxt = t_in if use_doc else task.due_at  # type: ignore[union-attr]
-        if open_esc and not use_doc and task is not None and _keepalive(task):
+        # only lease keep-alive work left while a human decides -> stop; but never strand an inbound doc
+        # still on its way (the keep-alive then runs and the loop reaches the doc)
+        if open_esc and t_in is None and task is not None and _keepalive(task):
             status = "BLOCKED_ON_HUMAN"
             break
         if until is not None and nxt > until:

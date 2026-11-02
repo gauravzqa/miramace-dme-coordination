@@ -7,7 +7,7 @@ Nothing is planned when the case is not ACTIVE; nothing for a track whose owner 
 
 Rules (plan-core "Planner"), evaluated in order; rule 12 (lease) is checked before 7–11 so a release in this
 decision suppresses supplier/order/delivery tasks until the next plan:
-  1 welcome_intake ladder   2 request_order   3 PCP follow-ups 24/48/72bh → ORDER_STALLED
+  1 welcome_intake ladder   2 request_order   3 PCP follow-ups 8/16/24bh → ORDER_STALLED
   4 LCD addendum → LCD_MISSING_AFTER_ADDENDUM   5 CODE_DRIFT / correction → SWO_INCOMPLETE_AFTER_CORRECTION,
     ORDER_VALIDATED   6 rank + screen (one in flight, stop at 2 qualified) → SUPPLIERS_EXHAUSTED
   7 commit   8 cost_disclosure   9 send_order_<sid>   10 verify_order_received   11 reverify / propose_slot /
@@ -20,7 +20,7 @@ Task conventions (party_id, intent, version, args) — executor/interpret code a
     request_order            v = order_request_version + 1        args {request_version}
     followup_order_{k}       target = earliest OPEN PCP commitment, else the latest PCP commitment if BROKEN;
                              k = max(followups + 1, rungs whose time has passed) (1..3; a 4th virtual rung at
-                             due+96bh means "silent throughout" → ORDER_STALLED, as does followups ≥ 3);
+                             due+32bh means "silent throughout" → ORDER_STALLED, as does followups ≥ 3);
                              v = 100*(order_request_version-1) + 1-based index of the commitment among PCP
                              commitments (dict order); due = add_business_hours(c.due_at, 24/48/72)
                              args {cid, what, k}
@@ -103,7 +103,10 @@ class Policy:
     screen_attempts: int = 3  # per supplier
     screen_retry_bh: float = 2.0
     qualified_target: int = 2  # primary + backup, then screening stops
-    pcp_followup_offsets_bh: tuple[float, ...] = (24.0, 48.0, 72.0)
+    # with a usable supplier in hand, stop hunting a backup once this many suppliers were contacted
+    backup_screen_cap: int = 6
+    # next business morning, then daily
+    pcp_followup_offsets_bh: tuple[float, ...] = (8.0, 16.0, 24.0)
     call_max_attempts: int = 3
     reverify_attempts: int = 2
     reverify_lead_h: float = 2.0  # lease reverify is due this long before the lease ends
@@ -360,6 +363,16 @@ def _r2_request_order(c: _Ctx) -> None:
         )
 
 
+def _followup_rungs(due_at: datetime, offs: tuple[float, ...]) -> list[datetime]:
+    """Follow-up times after a PCP promise. A promise due mid-business-day gets due+offs; one due at/after
+    close ("by Thursday" = Thu 17:00) is anchored on the next business morning so the first rung is that
+    morning (plain business-hour arithmetic would land a full business day later)."""
+    anchor = next_business_time(due_at)
+    if anchor == due_at:
+        return [add_business_hours(due_at, o) for o in offs]
+    return [add_business_hours(anchor, o - offs[0]) for o in offs]
+
+
 def _r3_pcp_followups(c: _Ctx) -> None:
     s, p = c.state, c.policy
     if OrderStatus(s.order.state) not in _FOLLOWUP_ORDER_STATES:
@@ -373,7 +386,7 @@ def _r3_pcp_followups(c: _Ctx) -> None:
     else:
         return
     offs = p.pcp_followup_offsets_bh
-    rungs = [add_business_hours(cm.due_at, o) for o in (*offs, offs[-1] + offs[0])]
+    rungs = _followup_rungs(cm.due_at, (*offs, offs[-1] + offs[0]))
     k = max(cm.followups + 1, sum(1 for t in rungs if t <= c.now))
     if k > len(offs):
         c.escalate(
@@ -384,7 +397,7 @@ def _r3_pcp_followups(c: _Ctx) -> None:
         return
     epoch = max(0, s.order_request_version - 1)
     version = 100 * epoch + 1 + [x.cid for x in pcp].index(cm.cid)
-    due = add_business_hours(cm.due_at, offs[k - 1])
+    due = rungs[k - 1]
     c.task(
         Track.ORDER,
         TaskKind.CALL_PCP,
@@ -459,6 +472,28 @@ def _r5_swo(c: _Ctx) -> None:
         c.event(EventType.ORDER_VALIDATED, None, "planner:order_validated")
 
 
+def _backup_hunt_over(s: CaseState, p: Policy, ranking: list[tuple[str, float]]) -> bool:
+    """No more cold screening calls for a BACKUP once a usable supplier exists and the case is past the point
+    where a backup helps: delivery scheduled (or later); the order is validated / sent / received (the order
+    goes to the supplier we have — a ghost there is handled by release + redirect, and screening resumes only
+    if no usable supplier is left); or `backup_screen_cap` suppliers have been contacted. Never stops a hunt
+    with no usable supplier, so SUPPLIERS_EXHAUSTED behaviour is unchanged."""
+    usable = [
+        sid
+        for sid, _ in ranking
+        if _rec(s, sid).status == SupplierStatus.COMMITTED
+        or (_rec(s, sid).status == SupplierStatus.QUALIFIED and rules.assignment_ok(sid, s))
+    ]
+    if not usable:
+        return False
+    if DeliveryStatus(s.delivery.state) not in _PRE_DELIVERY:
+        return True
+    if OrderStatus(s.order.state) in (OrderStatus.VALID, OrderStatus.SENT_TO, OrderStatus.RECEIVED_BY):
+        return True
+    contacted = sum(1 for sid, _ in ranking if _rec(s, sid).status != SupplierStatus.UNCONTACTED)
+    return contacted >= p.backup_screen_cap
+
+
 def _r6_screen(c: _Ctx) -> None:
     s, p = c.state, c.policy
     pz = _patient_zip(s)
@@ -476,7 +511,7 @@ def _r6_screen(c: _Ctx) -> None:
         for sid, _ in ranking
         if _rec(s, sid).status in (SupplierStatus.QUALIFIED, SupplierStatus.COMMITTED)
     ]
-    if len(good) >= p.qualified_target:
+    if len(good) >= p.qualified_target or _backup_hunt_over(s, p, ranking):
         return
     fresh = [
         (i, sid, d) for i, (sid, d) in enumerate(ranking) if _rec(s, sid).status == SupplierStatus.UNCONTACTED
@@ -630,7 +665,9 @@ def _r12_lease(c: _Ctx) -> None:
     rec = _rec(s, sid)
     end = _lease_end(rec, p)
     if rec.attempts >= p.reverify_attempts:
-        reason = f"no answer to {rec.attempts} re-verification calls"
+        checking_receipt = s.order_sent_to == sid and OrderStatus(s.order.state) == OrderStatus.SENT_TO
+        what = "order-receipt checks" if checking_receipt else "re-verification calls"
+        reason = f"no answer to {rec.attempts} {what}"
     elif end is None:
         return
     else:

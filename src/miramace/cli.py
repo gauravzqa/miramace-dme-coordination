@@ -27,15 +27,38 @@ console = Console(highlight=False)
 TRACKS = ("order", "supplier", "patient", "delivery", "assignment", "case")
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]  # src/miramace/cli.py -> repo root (editable install)
+
+
+def env_files() -> list[Path]:
+    """Candidate .env files, highest priority first: CWD, then the repo root (package parent)."""
+    out: list[Path] = []
+    for p in (Path.cwd() / ".env", REPO_ROOT / ".env"):
+        if p.is_file() and p.resolve() not in {q.resolve() for q in out}:
+            out.append(p)
+    return out
+
+
+def load_env() -> list[Path]:
+    """Load .env from CWD and the repo root without overriding real environment variables (the first file
+    to set a key wins). Returns the files found."""
+    files = env_files()
+    try:
+        from dotenv import load_dotenv
+    except Exception:  # pragma: no cover - dotenv optional at runtime
+        return files
+    for f in files:
+        try:
+            load_dotenv(f, override=False)
+        except Exception:  # pragma: no cover
+            pass
+    return files
+
+
 @app.callback()
 def main() -> None:
     """Mira Mace CLI."""
-    try:
-        from dotenv import load_dotenv
-
-        load_dotenv(override=False)
-    except Exception:  # pragma: no cover - dotenv optional at runtime
-        pass
+    load_env()
 
 
 @app.command()
@@ -57,10 +80,27 @@ def _check_mode(llm: str) -> str:
     if mode not in ("fake", "live"):
         _fail(f"--llm must be 'fake' or 'live', got {llm!r}")
     if mode == "live":
-        missing = [k for k in ("OPENAI_API_KEY", "MIRA_TEXT_MODEL") if not os.environ.get(k)]
+        missing = [k for k in ("OPENAI_API_KEY", "MIRA_TEXT_MODEL") if not os.environ.get(k, "").strip()]
         if missing:
-            _fail(f"--llm live needs {', '.join(missing)} (set them in .env; see .env.example)")
+            looked = ", ".join(str(p) for p in (Path.cwd() / ".env", REPO_ROOT / ".env"))
+            hint = {
+                "OPENAI_API_KEY": "OPENAI_API_KEY=sk-...",
+                "MIRA_TEXT_MODEL": "MIRA_TEXT_MODEL=<model id, e.g. gpt-4o-mini>",
+            }
+            _fail(
+                f"--llm live needs {', '.join(missing)}. Add "
+                + "; ".join(hint[k] for k in missing)
+                + f" to .env (looked in: {looked}) or export it; see .env.example"
+            )
     return mode
+
+
+def _set_llm_budget(max_llm_calls: int | None) -> None:
+    """--max-llm-calls -> MIRA_MAX_LLM_CALLS (read by OpenAILLM; default 400 API requests per run)."""
+    if max_llm_calls is not None:
+        if max_llm_calls < 1:
+            _fail("--max-llm-calls must be >= 1")
+        os.environ["MIRA_MAX_LLM_CALLS"] = str(max_llm_calls)
 
 
 def _engine(name: str) -> Any:
@@ -133,11 +173,15 @@ def run(
     show_all: bool = typer.Option(
         False, "--all", help="Include audit events (CALL_COMPLETED) in the timeline."
     ),
+    max_llm_calls: int = typer.Option(
+        None, "--max-llm-calls", help="Live only: hard cap on OpenAI requests (env MIRA_MAX_LLM_CALLS, 400)."
+    ),
 ) -> None:
     """Run one scenario end to end on the virtual clock, streaming the timeline."""
     from miramace import render
 
     mode = _check_mode(llm)
+    _set_llm_budget(max_llm_calls)
     scen = _engine("scenario")
     run_scenario = _need(scen, "run_scenario")
     on_event = None if quiet else render.live_printer(console, show_all=show_all)
@@ -158,12 +202,18 @@ def run_all(
     llm: str = typer.Option("fake", "--llm", help="fake | live"),
     db_dir: str = typer.Option("runs", "--db-dir"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Stream every scenario's timeline."),
+    max_llm_calls: int = typer.Option(
+        None,
+        "--max-llm-calls",
+        help="Live only: cap on OpenAI requests PER scenario (env MIRA_MAX_LLM_CALLS).",
+    ),
 ) -> None:
     """Run every scenario and print the metrics table. Exit 1 on any false close, invariant violation or
     failed expectation."""
     from miramace import render
 
     mode = _check_mode(llm)
+    _set_llm_budget(max_llm_calls)
     scen = _engine("scenario")
     metrics = _engine("metrics")
     names = _need(scen, "list_scenarios")()
@@ -237,7 +287,8 @@ def transcripts(case_id: str, db_dir: str = typer.Option("runs", "--db-dir")) ->
     from miramace import render
 
     store, _ = _open(case_id, db_dir)
-    render.render_transcript_list(store.transcripts(case_id), console=console)
+    intents = {t.task_id: t.intent for t in store.tasks(case_id)}
+    render.render_transcript_list(store.transcripts(case_id), console=console, intents=intents)
 
 
 @app.command()
@@ -313,7 +364,7 @@ def resolve(
     new = store.events(case_id)[before:]
     console.rule(f"[bold]resolved {eid} -> {option}[/bold]")
     render.render_timeline(new, console=console)
-    render.render_summary(summary, _score(summary, scenario_obj, store), console=console)
+    render.render_summary(summary, _score(summary, scenario_obj, store), console=console, resumed=True)
 
 
 # ---------------------------------------------------------------------------------------------- chat
@@ -326,6 +377,50 @@ def _last_purpose(store: Any, case_id: str) -> str | None:
         if e.type == EventType.PATIENT_NOTIFIED:
             return e.payload.get("purpose")
     return None
+
+
+_CONCERN_INTENTS = ("cost_concern", "needs_human")
+
+
+def _submit_intents(api: Any, case_id: str, intents: list[Any], store: Any) -> list[tuple[Any, Any]]:
+    """Submit each intent; a concern rejected because the case is closed is re-routed as needs_human
+    (allowed on a closed case) so the care team still hears about it."""
+    out: list[tuple[Any, Any]] = []
+    for intent in intents:
+        ack = api.submit(case_id, intent)
+        out.append((intent, ack))
+        if not ack.accepted and intent.kind in _CONCERN_INTENTS and intent.kind != "needs_human":
+            fb = intent.model_copy(update={"kind": "needs_human", "note": "human"})
+            out.append((fb, api.submit(case_id, fb)))
+    return out
+
+
+def _honest_reply(reply: str, acks: list[tuple[Any, Any]], state: Any) -> str:
+    """Keep the companion's reply unless an intent it relied on was rejected; else say what happened."""
+    rejected = [(i, a) for i, a in acks if not a.accepted]
+    if not rejected:
+        return reply
+    routed = any(a.accepted and i.kind in _CONCERN_INTENTS for i, a in acks)
+    closed = str(getattr(state.case, "state", "")) in (
+        "DONE",
+        "CANCELLED",
+        "CaseStatus.DONE",
+        "CaseStatus.CANCELLED",
+    )
+    if closed:
+        if routed:
+            return (
+                "Your case is closed — I've let our care team know you reached out; "
+                "a nurse can call you back."
+            )
+        return (
+            "Your case is closed, so I couldn't record that here. "
+            "Please call our care team and a nurse can help."
+        )
+    if routed:
+        return "I've let our care team know you reached out; a nurse can call you back."
+    reason = rejected[0][1].reason or "it doesn't match where your order is right now"
+    return f"I wasn't able to record that just now ({reason}). Nothing has changed on your order."
 
 
 async def _chat_loop(case_id: str, mode: str, db_dir: str, resume: bool) -> None:
@@ -369,18 +464,18 @@ async def _chat_loop(case_id: str, mode: str, db_dir: str, resume: bool) -> None
             continue
         snap = build_snapshot(store.state(case_id), clock.now())
         reply = await companion.respond(snap, history, text)
+        # Submit intents FIRST: the reply must never promise something the case then rejects.
+        acks = _submit_intents(api, case_id, reply.intents, store)
+        say = _honest_reply(reply.reply, acks, store.state(case_id))
         ts = float(len(history))
         history.append(Utterance(turn=len(history), speaker="counterparty", name="Eleanor", text=text, ts=ts))
-        history.append(
-            Utterance(turn=len(history), speaker="caller", name="Mira", text=reply.reply, ts=ts + 1)
-        )
-        console.print(f"[bold cyan]Mira>[/bold cyan] {reply.reply}")
+        history.append(Utterance(turn=len(history), speaker="caller", name="Mira", text=say, ts=ts + 1))
+        console.print(f"[bold cyan]Mira>[/bold cyan] {say}")
         if reply.flags or not reply.grounding_ok:
             flags = list(reply.flags) + ([] if reply.grounding_ok else ["grounding_failed"])
             console.print(f"[yellow]  flags: {', '.join(flags)}[/yellow]")
         unblocked = False
-        for intent in reply.intents:
-            ack = api.submit(case_id, intent)
+        for intent, ack in acks:
             style = "green" if ack.accepted else "red"
             detail = ", ".join(ack.events) or "-"
             reason = f" ({ack.reason})" if ack.reason else ""

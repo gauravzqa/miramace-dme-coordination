@@ -372,10 +372,20 @@ def _pcp(
             out,
             f"pcp:send_order:{sid}:v{task.version}",
             PCP_PARTY_ID,
-            f"fax the signed order to {sid}",
+            f"fax the signed order to {_display_name(sid)}",
             due,
             _quote(cl, "will_fax_order"),
         )
+
+
+def _display_name(sid: str) -> str:
+    """Directory display name for human-facing text (ledger, timeline); falls back to the sid."""
+    try:
+        from miramace.snapshot import supplier_name
+
+        return supplier_name(sid) or sid
+    except Exception:
+        return sid
 
 
 def _pcp_followup(
@@ -385,7 +395,6 @@ def _pcp_followup(
     Received with a new promised date -> COMMITMENT_BROKEN + COMMITMENT_MADE (same cid: followups advance,
     re-opened with the new due). No answer / no new promise -> COMMITMENT_BROKEN only (F1 rule b)."""
     cid = task.args.get("cid")
-    open_ = cid in s.commitments and s.commitments[cid].status == "OPEN"
     # F1 contract: an unanswered follow-up advances the ladder even when the promise is already BROKEN.
     live = cid in s.commitments and s.commitments[cid].status in ("OPEN", "BROKEN")
     if not answered:
@@ -455,7 +464,7 @@ def _supplier(
         return
     if not answered:
         if intent in ("verify_order_received", "reverify") and rec.status == SupplierStatus.COMMITTED:
-            out.add(ET.SUPPLIER_NO_ANSWER, {"sid": sid, "attempt": task.attempts + 1})  # F1 rule c
+            out.add(ET.SUPPLIER_NO_ANSWER, {"sid": sid, "attempt": rec.attempts + 1})  # F1 rule c
         return
     if intent == "commit":
         if rec.status != SupplierStatus.QUALIFIED or s.committed_sid is not None:

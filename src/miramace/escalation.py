@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -148,6 +149,12 @@ def _fmt(v: Any) -> Any:
     return v
 
 
+def _tidy(q: str) -> str:
+    """Punctuation after interpolation: 'concern: "I can't afford this.". Please' -> '…this." Please'."""
+    q = re.sub(r'([.!?])"\.', r'\1"', q)
+    return re.sub(r"([!?])\.|(?<!\.)\.\.(?!\.)", lambda m: m.group(1) or ".", q)
+
+
 def option_ids(trigger: EscalationTrigger | str) -> list[str]:
     return [oid for oid, _ in CATALOGUE[EscalationTrigger(trigger)].options]
 
@@ -165,7 +172,7 @@ def build_escalation(
     spec = CATALOGUE[trig]
     ctx = dict(context or {})
     track = Track(ctx.get("track", spec.track))
-    question = spec.question.format_map(_SafeDict({k: _fmt(v) for k, v in ctx.items()}))
+    question = _tidy(spec.question.format_map(_SafeDict({k: _fmt(v) for k, v in ctx.items()})))
     return Escalation(
         eid=next_eid(trig, state),
         lane=spec.lane,

@@ -678,6 +678,8 @@ def _supplier_committed(s: CaseState, e: Event) -> None:
     if s.assignment_by_sid.get(p.sid) != AssignmentStatus.CONFIRMED_ALL_MONTHS:
         raise _illegal(e, f"assignment not confirmed for {p.sid!r}")
     rec.status, rec.ref, rec.expires_at = SupplierStatus.COMMITTED, p.ref, p.expires_at
+    # the commit call reserved a unit, which re-verifies stock as of now (no separate pre-schedule reverify)
+    rec.verified_at = max(rec.verified_at or e.sim_time, e.sim_time)
     rec.attempts = 0  # from here on `attempts` counts unanswered reverify/verify calls since commit
 
 

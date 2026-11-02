@@ -316,7 +316,7 @@ def event_summary(e: Event) -> str:
             return f"PCP refused: {p.get('reason')}"
         if t == ET.CANDIDATES_RANKED:
             d = p.get("distances") or {}
-            top = ", ".join(f"{_short(s)} {d.get(s, 0):.1f}mi" for s in (p.get("sids") or [])[:3])
+            top = ", ".join(f"{_short(s)} {_mi(d.get(s, 0))}" for s in (p.get("sids") or [])[:3])
             return f"{len(p.get('sids') or [])} suppliers ranked; nearest: {top}"
         if t == ET.SUPPLIER_NO_ANSWER:
             return f"{_name(p.get('sid'))}: no answer (attempt {p.get('attempt')})"
@@ -479,7 +479,21 @@ def _days(a: Any, b: Any) -> str:
     return f"{(db - da).total_seconds() / 86400:.1f}"
 
 
-def render_summary(summary: Any, score: Any = None, *, console: Console | None = None) -> None:
+def _mi(d: Any) -> str:
+    try:
+        v = float(d)
+    except (TypeError, ValueError):
+        return "?"
+    if v == 0:
+        return "(same ZIP)"  # ZIP-centroid heuristic: same ZIP as the patient
+    return "<0.1 mi" if v < 0.1 else f"{v:.1f} mi"
+
+
+def render_summary(
+    summary: Any, score: Any = None, *, console: Console | None = None, resumed: bool = False
+) -> None:
+    """`resumed=True` (after `mira resolve`): the scenario's expect.final described the autonomous run, so it
+    is not scored again; the panel says the case resumed after a human resolution instead."""
     con = console or Console()
     s = _fields(summary)
     status = str(s.get("status", "?"))
@@ -506,7 +520,15 @@ def render_summary(summary: Any, score: Any = None, *, console: Console | None =
     )
     cost = s.get("cost_usd")
     t.add_row("LLM usage", f"{s.get('usage_tokens') or 0} tokens" + (f", ${cost:.4f}" if cost else ""))
-    if score is not None:
+    if resumed:
+        style = "bold green" if status == "DONE" else "bold yellow"
+        t.add_row("outcome", Text(f"resumed after human resolution \u2192 {status}", style=style))
+        if score is not None:
+            sc = _fields(score)
+            for k in ("false_close", "phi_before_qualification"):
+                if k in sc:
+                    t.add_row(k.replace("_", " "), str(sc[k]))
+    elif score is not None:
         sc = _fields(score)
         passed = sc.get("passed", sc.get("met_expectation"))
         if passed is not None:
@@ -664,10 +686,14 @@ def render_transcript(record: Any, *, console: Console | None = None) -> None:
         con.print(Text("flags: " + ", ".join(result.flags), style="yellow"))
 
 
-def render_transcript_list(records: Iterable[Any], *, console: Console | None = None) -> None:
+def render_transcript_list(
+    records: Iterable[Any], *, console: Console | None = None, intents: dict[str, str] | None = None
+) -> None:
+    """`intents`: task_id -> call intent (screen, commit, request_order…), shown instead of the task UUID."""
     con = console or Console()
+    intents = intents or {}
     tbl = Table(header_style="bold")
-    for col in ("transcript", "sim time", "party", "task", "outcome", "transport", "turns", "stated claims"):
+    for col in ("transcript", "sim time", "party", "call", "outcome", "transport", "turns", "stated claims"):
         tbl.add_column(col, overflow="fold")
     for r in records:
         res = r.result
@@ -676,7 +702,7 @@ def render_transcript_list(records: Iterable[Any], *, console: Console | None = 
             r.transcript_id,
             sim_time_label(r.sim_time),
             _short(r.party_id),
-            r.task_id.split(":", 1)[-1],
+            intents.get(r.task_id) or r.task_id.split(":", 1)[-1][:8],
             res.outcome,
             res.transport,
             str(len(res.transcript)),

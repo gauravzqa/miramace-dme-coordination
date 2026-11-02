@@ -214,13 +214,14 @@ def test_v1_resend_with_reused_cid_gets_no_followup():
     s.add(ET.ORDER_REQUESTED, {"request_ref": "q1", "version": 1})
     due = s.now + 24 * H
     s.add(ET.COMMITMENT_MADE, {"cid": "pcp-order", "party": "pcp", "what": "fax", "due_at": due})
-    first = {k for k in keys(s.at(add_business_hours(due, 24)).plan()) if k[1].startswith("followup")}
+    # first follow-up rung (8 business hours after the promise)
+    first = {k for k in keys(s.at(add_business_hours(due, 8)).plan()) if k[1].startswith("followup")}
     s.add(ET.ORDER_REQUEST_VERIFIED, {"received": False})
     assert ("pcp", "request_order", 2) in keys(s.plan())
     s.add(ET.ORDER_REQUESTED, {"request_ref": "q2", "version": 2})
     due2 = s.now + 24 * H
     s.add(ET.COMMITMENT_MADE, {"cid": "pcp-order", "party": "pcp", "what": "fax", "due_at": due2})
-    second = {k for k in keys(s.at(add_business_hours(due2, 24)).plan()) if k[1].startswith("followup")}
+    second = {k for k in keys(s.at(add_business_hours(due2, 8)).plan()) if k[1].startswith("followup")}
     assert second - first, f"v2 follow-up key {second} collides with v1 {first}"
 
 
@@ -229,7 +230,7 @@ def test_v1_never_got_it_with_fresh_cid_works():
     s.add(ET.ORDER_REQUESTED, {"request_ref": "q1", "version": 1})
     due = s.now + 24 * H
     s.add(ET.COMMITMENT_MADE, {"cid": "c1", "party": "pcp", "what": "fax", "due_at": due})
-    s.at(add_business_hours(due, 24))
+    s.at(add_business_hours(due, 8))  # first follow-up rung: next business morning
     assert ("pcp", "followup_order_1", 1) in keys(s.plan())
     s.add(ET.ORDER_REQUEST_VERIFIED, {"received": False})
     assert ("pcp", "request_order", 2) in keys(s.plan())

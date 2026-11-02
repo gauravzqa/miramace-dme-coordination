@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict
 from miramace.agents.prompts import DISCLOSURE, PHI_PHASES, contains_mbi, contains_phi
 from miramace.agents.schemas import CallerTurn, PersonaTurn
 from miramace.clock import is_business, next_business_time
-from miramace.extract.extractor import looks_like_injection, normalize
+from miramace.extract.extractor import is_readback, looks_like_injection, normalize
 from miramace.models import (
     CHICAGO,
     CallOutcome,
@@ -37,8 +37,20 @@ from miramace.ports import Brain, CallPhase, TranscriptView
 SECONDS_PER_UTTERANCE = 6.0
 CALLER_NAME = "Mira Mace AI"
 
+# First-person commitments made BY the caller on the patient's behalf. Readback sentences that restate what
+# the counterparty said ("Just to confirm what I heard: yes, we accept assignment…") are exempt — see
+# `_strip_readback`.
 _COMMITMENT_RE = re.compile(
-    r"\b(she agrees|he agrees|she'?ll pay|she will pay|we accept|schedule it for|go ahead and)\b", re.I
+    r"\b(she agrees|he agrees|the patient agrees|she'?ll pay|he'?ll pay|she will pay|he will pay|"
+    r"we'?ll pay|we accept|we'?ll take it|we will take it|schedule it for|"
+    r"go ahead and (schedule|book|ship|send|deliver|order|bill|charge)|"
+    r"(yes|yeah|ok|okay|sure),? (book|schedule|ship|order) it)\b",
+    re.I,
+)
+_READBACK_FRAME_RE = re.compile(
+    r"(confirm what i heard|let me read (that|it) back|reading (that|it) back"
+    r"|(so|just) to confirm\s*[:,\-—]?\s*you\b)",
+    re.I,
 )
 _CALLBACK_RE = re.compile(r"\b(call (us |me )?back|callback)\b")
 _CALLBACK_HOUR_RE = re.compile(r"after\s+(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?", re.I)
@@ -242,6 +254,17 @@ def phase_from(transcript: Transcript, task: CallTask) -> CallPhase:
     return "readback"
 
 
+def _strip_readback(say: str, phase: str) -> str:
+    """The part of a caller line that is the caller's OWN speech: a readback (readback phase, or a line framed
+    "Just to confirm what I heard: …" / "So to confirm: you …") restates the counterparty and is dropped."""
+    if phase == "readback" and is_readback(say):
+        return ""
+    m = _READBACK_FRAME_RE.search(say)
+    if m is None:
+        return say
+    return say[: m.start()]
+
+
 def guard_caller_turn(
     task: CallTask, phase: str, turn: CallerTurn, utterances: list[Utterance] | None = None
 ) -> tuple[CallerTurn, list[str]]:
@@ -266,7 +289,7 @@ def guard_caller_turn(
         else:
             say = f"Before we go further, can you confirm I've reached {task.org_name}?"
         slots = []
-    if _COMMITMENT_RE.search(say):
+    if _COMMITMENT_RE.search(_strip_readback(say, phase)):
         flags.append("commitment_blocked")
         say, slots = (
             "I can't agree to anything on the patient's behalf, but I'll pass that to the care team.",

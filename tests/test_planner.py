@@ -143,9 +143,9 @@ def test_no_answer_retry_and_exhaustion():
     assert len(escs) == 1 and escs[0].parsed().escalation.trigger == EscalationTrigger.SUPPLIERS_EXHAUSTED
 
 
-def test_followups_at_24_48_72_bh_then_stalled():
+def test_followups_at_8_16_24_bh_then_stalled():
     due = datetime(2026, 11, 3, 10, tzinfo=CHICAGO)
-    for k, offs in [(1, 24), (2, 48), (3, 72)]:
+    for k, offs in [(1, 8), (2, 16), (3, 24)]:
         cm = Commitment(cid="cm1", party="pcp", what="fax visit note + SWO", due_at=due, followups=k - 1)
         s = consented(
             order=TrackState(state=OrderStatus.REQUESTED, owner=Owner.PCP),
@@ -155,7 +155,7 @@ def test_followups_at_24_48_72_bh_then_stalled():
         t = by_intent(plan(s, due))[("pcp", f"followup_order_{k}")]
         assert t.due_at == add_business_hours(due, offs)
         assert is_business(t.due_at)
-    assert add_business_hours(due, 24) == datetime(2026, 11, 6, 10, tzinfo=CHICAGO)
+    assert add_business_hours(due, 8) == datetime(2026, 11, 4, 10, tzinfo=CHICAGO)
     cm = Commitment(cid="cm1", party="pcp", what="fax", due_at=due, followups=3)
     s = consented(order=TrackState(state=OrderStatus.REQUESTED, owner=Owner.PCP), commitments={"cm1": cm})
     dec = plan(s, due + timedelta(days=10))
@@ -349,7 +349,7 @@ def test_schedule_flow_and_done():
 
 
 def test_policy_default_is_frozen():
-    assert Policy().lease_h == 72 and Policy().pcp_followup_offsets_bh == (24, 48, 72)
+    assert Policy().lease_h == 72 and Policy().pcp_followup_offsets_bh == (8, 16, 24)
 
 
 # ------------------------------------------------------------------ F1: liveness fixes (event-driven)

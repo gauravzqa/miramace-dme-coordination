@@ -482,11 +482,45 @@ class Executor:
 
     # ---------------------------------------------------------------------------------- docs
     async def ingest_doc(self, doc: InboundDoc, state: CaseState) -> list[Event]:
-        try:
-            claims = await self.ports.doc_reader.read_doc(doc)
-        except Exception:
-            claims = []
-        return self.append(interpret_doc(doc, claims, state, self.clock.now()))
+        """Read + interpret an inbound doc. A reader crash is NOT "no criteria found": it is recorded as
+        EXTRACTION_FAILED and retried once; if the retry also fails the doc is not interpreted and an
+        EXTRACTION_CHECK_FAILED escalation (order track) asks a human to review it."""
+        now = self.clock.now()
+        src = Source(kind="INBOUND_DOC", ref=doc.doc_id)
+        out: list[Event] = []
+        for attempt in (1, 2):
+            try:
+                claims = await self.ports.doc_reader.read_doc(doc)
+            except Exception as exc:
+                reason = f"doc reader failed (attempt {attempt}/2): {type(exc).__name__}: {exc}"[:300]
+                out += self.append(
+                    [
+                        make_event(
+                            state.case_id,
+                            ET.EXTRACTION_FAILED,
+                            {"task_id": doc.doc_id, "field": "document", "reason": reason},
+                            src,
+                            now,
+                        )
+                    ]
+                )
+                continue
+            return out + self.append(interpret_doc(doc, claims, self.store.state(state.case_id), now))
+        kind = str(getattr(doc, "kind", "document")).replace("_", " ").lower()
+        esc = open_escalation(
+            "EXTRACTION_CHECK_FAILED",
+            self.store.state(state.case_id),
+            now,
+            context={
+                "field": kind,
+                "party": "Dr. Chen's office (inbound fax)",
+                "reason": "the document reader failed twice; please review the fax manually",
+                "doc_id": doc.doc_id,
+                "track": "order",
+            },
+            source=src,
+        )
+        return out + self.append([esc])
 
 
 __all__ = ["Executor", "SLOTS", "build_call_task", "phi_allowed", "slot_family", "PCP_PARTY_ID"]
