@@ -29,6 +29,8 @@ Claims inside `sim.note_claims` / `sim.addendum_claims` may omit `status` (defau
 
 from __future__ import annotations
 
+import logging
+import os
 import uuid
 from pathlib import Path
 from typing import Any, Literal
@@ -48,6 +50,8 @@ from miramace.models import (
 )
 from miramace.ports import Ports
 from miramace.store import Store
+
+log = logging.getLogger(__name__)
 
 SCENARIO_DIR = Path(__file__).resolve().parents[2] / "scenarios"
 
@@ -216,54 +220,46 @@ def build_ports(
     llm = None
     if mode == "live":
         from miramace.companion.agent import LLMCompanion
-        from miramace.llm.port import OpenAILLM
+        from miramace.llm.port import make_llm
 
-        llm = OpenAILLM()
+        llm = make_llm("live")  # OpenAILLM; raises LLMUnavailable with a clear message if env is missing
+
+    def brains(eff: EffectivePersonas) -> tuple[Any, Any, Any]:
+        """(caller factory, persona factory(pid), extractor) — live LLM brains or offline rule-based ones."""
+        if llm is None:
+            return (lambda: FakeCallerBrain()), (lambda pid: FakePersonaBrain(eff[pid])), FakeExtractor(eff)
+        return (lambda: LLMCallerBrain(llm)), (lambda pid: LLMPersonaBrain(llm, eff[pid])), Extractor(llm)
 
     def make_caller() -> SimCallerPort:
         sim = SimCallerPort(personas, None, clock)
-        eff = EffectivePersonas(sim)
-        if llm is None:
-            inner = TextCallerPort(
-                lambda: FakeCallerBrain(),
-                lambda pid: FakePersonaBrain(eff[pid]),
-                FakeExtractor(eff),
-                clock=clock,
-            )
-        else:
-            inner = TextCallerPort(
-                lambda: LLMCallerBrain(llm),
-                lambda pid: LLMPersonaBrain(llm, eff[pid]),
-                Extractor(llm),
-                clock=clock,
-            )
-        sim.inner = inner
+        caller_f, persona_f, extractor = brains(EffectivePersonas(sim))
+        sim.inner = TextCallerPort(caller_f, persona_f, extractor, clock=clock)
         return sim
 
     caller_pcp = make_caller()
     caller_supplier = make_caller()
     if voice_pcp:
-        try:  # B5: VoiceCallerPort falls back to text on its own; any wiring error -> keep text
-            from miramace.voice.transport import VoiceCallerPort  # type: ignore[attr-defined]
+        # --voice-pcp is explicit: enable the pcp voice leg whatever .env says. VoiceCallerPort itself falls
+        # back to text (transport="text_fallback", flag voice_failed:<reason>) on ImportError/LiveKit errors.
+        os.environ["MIRA_VOICE"] = "1"
+        legs = {x.strip() for x in os.environ.get("MIRA_VOICE_LEGS", "pcp").split(",") if x.strip()}
+        os.environ["MIRA_VOICE_LEGS"] = ",".join(sorted(legs | {"pcp"}))
+        try:
+            from miramace.voice.transport import VoiceCallerPort
 
             eff = EffectivePersonas(caller_pcp)
-            if llm is not None:
-                voice = VoiceCallerPort(
-                    caller_brain=LLMCallerBrain(llm),
-                    persona_brain_factory=lambda pid: LLMPersonaBrain(llm, eff[pid]),
-                    extractor=Extractor(llm),
-                    clock=clock,
-                )
-            else:
-                voice = VoiceCallerPort(
-                    caller_brain=FakeCallerBrain(),
-                    persona_brain_factory=lambda pid: FakePersonaBrain(eff[pid]),
-                    extractor=FakeExtractor(eff),
-                    clock=clock,
-                )
-            caller_pcp.inner = voice
-        except Exception:
-            pass
+            caller_f, persona_f, extractor = brains(eff)
+            caller_pcp.inner = VoiceCallerPort(
+                caller_pcp.inner,  # the text port: fallback + non-voice legs
+                caller_f,
+                persona_f,
+                caller_pcp.effective,  # persona lookup (YAML persona + sim defaults)
+                extractor,
+                clock=clock,
+            )
+        except Exception as exc:  # wiring error: keep text, but say so loudly
+            log.warning("voice PCP leg unavailable (%s: %s); PCP calls stay on text", type(exc).__name__, exc)
+            caller_pcp.voice_error = exc  # type: ignore[attr-defined]
     script = {k: v for k, v in scenario.patient_script.items()}
     return Ports(
         caller_pcp=caller_pcp,

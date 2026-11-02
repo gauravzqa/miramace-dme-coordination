@@ -48,23 +48,58 @@ def cost_usd(ledger: list[LLMCall]) -> float | None:
 # ------------------------------------------------------------------------------------------- live
 
 
-class OpenAILLM:
-    """OpenAI Responses API with strict structured outputs. One repair retry on parse failure."""
+DEFAULT_MAX_LLM_CALLS = 400
+DEFAULT_TIMEOUT_S = 45.0
+DEFAULT_SDK_RETRIES = 2
 
-    def __init__(self, model: str | None = None, *, client: Any | None = None) -> None:
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name) or default)
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name) or default)
+    except ValueError:
+        return default
+
+
+class OpenAILLM:
+    """OpenAI Responses API with strict structured outputs. One repair retry on parse failure.
+
+    Safety rails for real runs (env): MIRA_LLM_TIMEOUT (s per request, default 45), MIRA_LLM_RETRIES (SDK
+    retries on 429/5xx/timeouts, default 2), MIRA_MAX_OUTPUT_TOKENS (default 1200; the repair retry gets 4x,
+    since reasoning tokens count against the cap and truncation is the usual parse failure), and
+    MIRA_MAX_LLM_CALLS (hard budget of API requests per OpenAILLM instance = per run, default 400; beyond it
+    every call raises LLMUnavailable without touching the network).
+    """
+
+    def __init__(
+        self, model: str | None = None, *, client: Any | None = None, max_calls: int | None = None
+    ) -> None:
         self.model = model or os.environ.get("MIRA_TEXT_MODEL") or ""
         if not self.model:
             raise LLMUnavailable("MIRA_TEXT_MODEL is not set and no model was given")
         self.effort = os.environ.get("MIRA_REASONING_EFFORT") or None
+        self.max_output_tokens = _env_int("MIRA_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS)
+        self.max_calls = (
+            max_calls if max_calls is not None else _env_int("MIRA_MAX_LLM_CALLS", DEFAULT_MAX_LLM_CALLS)
+        )
+        self.timeout = _env_float("MIRA_LLM_TIMEOUT", DEFAULT_TIMEOUT_S)
+        self.sdk_retries = _env_int("MIRA_LLM_RETRIES", DEFAULT_SDK_RETRIES)
         self._client = client
         self.ledger: list[LLMCall] = []
+        self.requests_made = 0
 
     @property
     def client(self) -> Any:
         if self._client is None:
             from openai import AsyncOpenAI
 
-            self._client = AsyncOpenAI(timeout=30, max_retries=2)
+            self._client = AsyncOpenAI(timeout=self.timeout, max_retries=self.sdk_retries)
         return self._client
 
     async def structured(
@@ -72,7 +107,14 @@ class OpenAILLM:
     ) -> T:
         msgs = list(messages)
         last_err: Exception | None = None
+        max_out = self.max_output_tokens
         for _attempt in range(2):  # first try + 1 repair retry
+            if self.requests_made >= self.max_calls:
+                raise LLMUnavailable(
+                    f"{agent}:{key}: LLM call budget exhausted ({self.max_calls}; raise MIRA_MAX_LLM_CALLS "
+                    "or --max-llm-calls)"
+                )
+            self.requests_made += 1
             t0 = time.perf_counter()
             in_tok = out_tok = 0
             try:
@@ -82,7 +124,7 @@ class OpenAILLM:
                     input=msgs,
                     text_format=schema,
                     store=False,
-                    max_output_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
+                    max_output_tokens=max_out,
                     **({"reasoning": {"effort": self.effort}} if self.effort else {}),
                 )
                 usage = getattr(resp, "usage", None)
@@ -91,7 +133,9 @@ class OpenAILLM:
                     out_tok = int(getattr(usage, "output_tokens", 0) or 0)
                 parsed = getattr(resp, "output_parsed", None)
                 if parsed is None:
-                    raise ValueError("model returned no parsed output (refusal or truncation)")
+                    details = getattr(resp, "incomplete_details", None)
+                    why = getattr(details, "reason", None) if details is not None else None
+                    raise ValueError(f"model returned no parsed output ({why or 'refusal or truncation'})")
                 if not isinstance(parsed, schema):
                     parsed = schema.model_validate(parsed)
                 self._log(agent, key, t0, in_tok, out_tok, True)
@@ -99,6 +143,7 @@ class OpenAILLM:
             except (ValidationError, ValueError) as e:  # parse problem -> repair once
                 self._log(agent, key, t0, in_tok, out_tok, False)
                 last_err = e
+                max_out = max_out * 4  # truncation (incl. reasoning tokens) is the usual cause
                 msgs = list(messages) + [
                     {
                         "role": "user",
@@ -163,7 +208,10 @@ def make_llm(mode: str | None = None) -> OpenAILLM | None:
     if mode == "fake":
         return None
     if mode == "live":
-        if not os.environ.get("OPENAI_API_KEY"):
-            raise LLMUnavailable("MIRA_LLM_MODE=live requires OPENAI_API_KEY")
+        missing = [k for k in ("OPENAI_API_KEY", "MIRA_TEXT_MODEL") if not os.environ.get(k)]
+        if missing:
+            raise LLMUnavailable(
+                f"live LLM mode requires {' and '.join(missing)} (set in .env or the environment)"
+            )
         return OpenAILLM()
     raise ValueError(f"unknown LLM mode {mode!r} (expected 'fake' or 'live')")
